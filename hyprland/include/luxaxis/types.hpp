@@ -16,6 +16,14 @@ struct Vec2 {
     friend bool operator==(const Vec2&, const Vec2&) = default;
 };
 
+struct Rect {
+    Vec2 position{};
+    Vec2 size{};
+
+    [[nodiscard]] bool contains(Vec2 point) const;
+    friend bool operator==(const Rect&, const Rect&) = default;
+};
+
 struct Color {
     double r = 0.0;
     double g = 0.0;
@@ -99,6 +107,10 @@ struct Config {
 
 inline double Length::resolve(const double shortEdge) const {
     return unit == LengthUnit::Pixels ? value : shortEdge * value / 100.0;
+}
+
+inline bool Rect::contains(const Vec2 point) const {
+    return size.x > 0.0 && size.y > 0.0 && point.x >= position.x && point.y >= position.y && point.x < position.x + size.x && point.y < position.y + size.y;
 }
 
 } // namespace luxaxis
