@@ -20,9 +20,11 @@ if(NOT tomlplusplus_FOUND)
   FetchContent_MakeAvailable(tomlplusplus)
 endif()
 
-add_library(luxaxis_core STATIC src/core/config.cpp src/core/engine.cpp src/core/spotlight.cpp)
+find_package(Threads REQUIRED)
+
+add_library(luxaxis_core STATIC src/core/config.cpp src/core/engine.cpp src/core/image_cache.cpp src/core/spotlight.cpp)
 target_include_directories(luxaxis_core PUBLIC include)
-target_link_libraries(luxaxis_core PRIVATE tomlplusplus::tomlplusplus)
+target_link_libraries(luxaxis_core PRIVATE tomlplusplus::tomlplusplus Threads::Threads)
 target_compile_options(luxaxis_core PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(luxaxis_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -45,7 +47,7 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING AND LUXAXIS_BUILD_TESTS)
-  foreach(test_name IN ITEMS config engine spotlight)
+  foreach(test_name IN ITEMS config engine image_cache spotlight)
     add_executable(luxaxis_${test_name}_tests tests/${test_name}_test.cpp)
     target_link_libraries(luxaxis_${test_name}_tests PRIVATE luxaxis_core)
     target_compile_options(luxaxis_${test_name}_tests PRIVATE -Wall -Wextra -Wpedantic)
