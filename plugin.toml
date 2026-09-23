@@ -1,0 +1,41 @@
+id = "yyc94/luxaxis"
+name = "Luxaxis"
+version = "0.1.0"
+plugin_api = 32
+author = "yyc94"
+license = "MIT"
+icon = "layout-dashboard"
+description = "A deeply customizable, output-aware Hyprland workspace widget for Noctalia."
+
+tags = ["bar", "hyprland", "productivity"]
+dependencies = ["socat"]
+
+[[setting]]
+key = "hide_when_empty"
+type = "bool"
+label_key = "settings.hide-empty.label"
+description_key = "settings.hide-empty.description"
+default = false
+
+[[setting]]
+key = "invert_scroll"
+type = "bool"
+label_key = "settings.invert-scroll.label"
+description_key = "settings.invert-scroll.description"
+default = false
+
+[[service]]
+id = "workspace-state"
+entry = "service.luau"
+
+[[widget]]
+id = "workspaces"
+entry = "widget.luau"
+
+[[panel]]
+id = "workspace-styles"
+entry = "panel.luau"
+width = 680
+height = 680
+placement = "floating"
+position = "center"

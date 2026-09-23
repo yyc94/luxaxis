@@ -1,0 +1,25 @@
+{
+  "panel": {
+    "apply": "Apply",
+    "base": "Base",
+    "cancel": "Cancel",
+    "close": "Close",
+    "diagnostics": "Diagnostics",
+    "empty-preview": "No workspace is available for preview",
+    "reset": "Reset layer",
+    "state": "State",
+    "title": "Workspace styles",
+    "workspace": "Workspace"
+  },
+  "settings": {
+    "hide-empty": {
+      "description": "Hide non-active workspaces that contain no windows",
+      "label": "Hide empty workspaces"
+    },
+    "invert-scroll": {
+      "description": "Reverse the workspace direction used by mouse-wheel and touchpad gestures",
+      "label": "Invert scroll direction"
+    }
+  },
+  "title": "Luxaxis"
+}
