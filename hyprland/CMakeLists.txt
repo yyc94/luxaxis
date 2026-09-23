@@ -9,6 +9,23 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(LUXAXIS_BUILD_PLUGIN "Build the Hyprland plugin" ON)
 option(LUXAXIS_BUILD_TESTS "Build core unit tests" ON)
 
+include(FetchContent)
+find_package(tomlplusplus 3.4 CONFIG QUIET)
+if(NOT tomlplusplus_FOUND)
+  FetchContent_Declare(
+    tomlplusplus
+    URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
+    URL_HASH SHA256=8517f65938a4faae9ccf8ebb36631a38c1cadfb5efa85d9a72e15b9e97d25155
+  )
+  FetchContent_MakeAvailable(tomlplusplus)
+endif()
+
+add_library(luxaxis_core STATIC src/core/config.cpp)
+target_include_directories(luxaxis_core PUBLIC include)
+target_link_libraries(luxaxis_core PRIVATE tomlplusplus::tomlplusplus)
+target_compile_options(luxaxis_core PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(luxaxis_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 if(LUXAXIS_BUILD_PLUGIN)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(HYPRLAND REQUIRED IMPORTED_TARGET hyprland=0.56.2)
@@ -27,3 +44,9 @@ endif()
 
 include(CTest)
 
+if(BUILD_TESTING AND LUXAXIS_BUILD_TESTS)
+  add_executable(luxaxis_core_tests tests/config_test.cpp)
+  target_link_libraries(luxaxis_core_tests PRIVATE luxaxis_core)
+  target_compile_options(luxaxis_core_tests PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME luxaxis_core_tests COMMAND luxaxis_core_tests)
+endif()
