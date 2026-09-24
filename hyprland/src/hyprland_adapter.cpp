@@ -81,9 +81,11 @@ Result<DecodedImage> decodeImage(const std::filesystem::path& path) {
     const auto width = static_cast<std::uint32_t>(size.x);
     const auto height = static_cast<std::uint32_t>(size.y);
     const auto sourceStride = surface->stride();
+    if (width == 0 || height == 0 || width > std::numeric_limits<std::uint32_t>::max() / 4U || sourceStride <= 0)
+        return Error{path.string(), "decoder returned an invalid Cairo surface"};
     const auto minimumStride = static_cast<std::uint64_t>(width) * 4ULL;
-    const auto pixelBytes = static_cast<std::uint64_t>(width) * height * 4ULL;
-    if (width == 0 || height == 0 || sourceStride <= 0 || static_cast<std::uint64_t>(sourceStride) < minimumStride ||
+    const auto pixelBytes = minimumStride * static_cast<std::uint64_t>(height);
+    if (static_cast<std::uint64_t>(sourceStride) < minimumStride || pixelBytes / minimumStride != height ||
         pixelBytes > std::numeric_limits<std::size_t>::max())
         return Error{path.string(), "decoder returned an invalid Cairo surface"};
 
@@ -91,7 +93,7 @@ Result<DecodedImage> decodeImage(const std::filesystem::path& path) {
         .width = width,
         .height = height,
         .stride = width * 4U,
-        .rgba = std::vector<std::uint8_t>(static_cast<std::size_t>(width) * height * 4U),
+        .rgba = std::vector<std::uint8_t>(static_cast<std::size_t>(pixelBytes)),
     };
 
     const auto* source = surface->data();
@@ -503,7 +505,10 @@ struct Adapter::Impl {
             if (before != beforePlans.end())
                 addEffectBounds(*before);
             addEffectBounds(*after);
-            if (!changedRegion.empty())
+            const auto monitor = std::ranges::find_if(
+                State::monitorState()->monitors(), [&current](const auto& candidate) { return candidate && candidate->m_name == *current; });
+            if (!changedRegion.empty() && monitor != State::monitorState()->monitors().end() &&
+                !Fullscreen::controller()->hasFullscreen(*monitor))
                 g_pHyprRenderer->damageRegion(changedRegion);
         });
     }
@@ -745,7 +750,7 @@ struct Adapter::Impl {
     }
 
     void drawWallpaperTexture(PHLMONITOR monitor, const SP<Render::ITexture>& texture, const Profile& profile, const float alpha = 1.F, const CRegion& clip = {}) {
-        if (!texture)
+        if (!texture || texture->m_size.x <= 0.0 || texture->m_size.y <= 0.0 || monitor->m_transformedSize.x <= 0.0 || monitor->m_transformedSize.y <= 0.0)
             return;
         const auto outputSize = monitor->m_transformedSize;
         const auto imageSize = Vector2D{texture->m_size.x, texture->m_size.y};
