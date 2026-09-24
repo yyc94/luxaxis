@@ -279,7 +279,8 @@ Config validate(const toml::table& root, const std::filesystem::path& home) {
     else if (root.contains("fallback_color"))
         fail("root.fallback_color", "expected a string");
 
-    const auto& profiles = requireTable(requireNode(root, "profiles", "root"), "root.profiles");
+    const auto& profilesNode = requireNode(root, "profiles", "root");
+    const auto& profiles = requireTable(profilesNode, "root.profiles");
     if (profiles.empty())
         fail("root.profiles", "at least one profile is required");
     for (const auto& [name, node] : profiles) {
@@ -291,7 +292,8 @@ Config validate(const toml::table& root, const std::filesystem::path& home) {
     if (!result.profiles.contains(result.defaultProfile))
         fail("root.default_profile", "references missing profile '" + result.defaultProfile + "'");
 
-    const auto& workspaces = requireTable(requireNode(root, "workspaces", "root"), "root.workspaces");
+    const auto& workspacesNode = requireNode(root, "workspaces", "root");
+    const auto& workspaces = requireTable(workspacesNode, "root.workspaces");
     for (const auto& [workspace, node] : workspaces) {
         std::int64_t id = 0;
         const auto raw = workspace.str();

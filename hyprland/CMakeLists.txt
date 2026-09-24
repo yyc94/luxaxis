@@ -32,8 +32,9 @@ if(LUXAXIS_BUILD_PLUGIN)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(HYPRLAND REQUIRED IMPORTED_TARGET hyprland=0.56.2)
 
-  add_library(luxaxis MODULE src/plugin.cpp)
-  target_link_libraries(luxaxis PRIVATE PkgConfig::HYPRLAND)
+  add_library(luxaxis MODULE src/plugin.cpp src/hyprland_adapter.cpp)
+  target_include_directories(luxaxis PRIVATE include)
+  target_link_libraries(luxaxis PRIVATE luxaxis_core PkgConfig::HYPRLAND)
   target_compile_options(luxaxis PRIVATE -Wall -Wextra -Wpedantic)
   set_target_properties(
     luxaxis
