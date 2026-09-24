@@ -107,6 +107,7 @@ void failedRefreshRetainsLastValidTexture() {
     cache.waitForIdle();
     auto uploads = cache.takeUploads();
     require(uploads.size() == 1, "replacement did not produce an upload");
+    require(uploads.front().previousTexture == original, "replacement did not retain the previous texture");
     const auto replacement = texture(2);
     require(cache.completeUpload(uploads.front(), replacement, 16), "replacement upload failed");
     require(cache.texture("/wall/a.png") == replacement, "replacement did not swap atomically");

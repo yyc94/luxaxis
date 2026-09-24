@@ -376,6 +376,7 @@ struct Adapter::Impl {
         Vec2 outputSize;
         Vec2 cursor;
         bool revealEnabled = false;
+        wl_output_transform transform = WL_OUTPUT_TRANSFORM_NORMAL;
     };
     std::unordered_map<std::string, MaskState> maskStates;
     std::unordered_map<std::string, Vec2> fanDirections;
@@ -384,6 +385,11 @@ struct Adapter::Impl {
         Profile profile;
     };
     std::unordered_map<std::string, LastWallpaper> lastWallpaperTextures;
+    struct ReplacementFade {
+        TextureHandle previousTexture;
+        std::chrono::steady_clock::time_point started;
+    };
+    std::unordered_map<std::filesystem::path, ReplacementFade> replacementFades;
     std::unordered_set<std::filesystem::path> reportedImageErrors;
     CHyprSignalListener renderStage;
     CHyprSignalListener workspaceActive;
@@ -450,13 +456,55 @@ struct Adapter::Impl {
                 damageOutput(*current);
         });
         cursorMove = Event::bus()->m_events.input.mouse.move.listen([this](Vector2D position, Event::SCallbackInfo&) {
+            const auto beforePlans = engine.plans();
             const auto previous = engine.activeOutput();
             if (!engine.setCursor({position.x, position.y}))
                 return;
-            if (previous)
-                damageOutput(*previous);
-            if (const auto current = engine.activeOutput(); current && current != previous)
+            const auto afterPlans = engine.plans();
+            const auto current = engine.activeOutput();
+            if (previous != current) {
+                if (previous)
+                    damageOutput(*previous);
+                if (current)
+                    damageOutput(*current);
+                return;
+            }
+            if (!current)
+                return;
+
+            const auto after = std::ranges::find_if(afterPlans, [&current](const auto& plan) { return plan.output == *current; });
+            if (after == afterPlans.end())
+                return;
+            const auto before = std::ranges::find_if(beforePlans, [&current](const auto& plan) { return plan.output == *current; });
+            if (after->transitioning || (before != beforePlans.end() && before->transitioning)) {
                 damageOutput(*current);
+                return;
+            }
+
+            CRegion changedRegion;
+            const auto addEffectBounds = [this, &changedRegion](const RenderPlan& plan) {
+                if (!plan.maskEnabled || !plan.revealEnabled)
+                    return;
+                const auto sample = SpotlightSample{
+                    .spotlight = plan.profile.spotlight,
+                    .outputSize = {plan.logicalBounds.size.x, plan.logicalBounds.size.y},
+                    .cursor = plan.cursorLocal,
+                    .revealEnabled = true,
+                    .fanDirection = fanDirections.contains(plan.output) ? fanDirections.at(plan.output) : Vec2{0.0, 1.0},
+                };
+                if (const auto bounds = spotlightEffectBounds(sample))
+                    changedRegion.add(CBox{
+                        plan.logicalBounds.position.x + bounds->position.x,
+                        plan.logicalBounds.position.y + bounds->position.y,
+                        bounds->size.x,
+                        bounds->size.y,
+                    });
+            };
+            if (before != beforePlans.end())
+                addEffectBounds(*before);
+            addEffectBounds(*after);
+            if (!changedRegion.empty())
+                g_pHyprRenderer->damageRegion(changedRegion);
         });
     }
 
@@ -471,6 +519,7 @@ struct Adapter::Impl {
         monitorFocused.reset();
         cursorMove.reset();
         maskTextures.clear();
+        replacementFades.clear();
     }
 
     void syncOutput(PHLMONITOR monitor) {
@@ -586,11 +635,11 @@ struct Adapter::Impl {
         const auto cacheKey = monitor->m_name + ":" + key;
         const auto outputSize = Vec2{monitor->m_size.x, monitor->m_size.y};
         const auto cursor = revealEnabled ? plan.cursorLocal : Vec2{};
-        const MaskState expected{profile.spotlight, outputSize, cursor, revealEnabled};
+        const MaskState expected{profile.spotlight, outputSize, cursor, revealEnabled, monitor->m_transform};
         auto& mask = maskTextures[cacheKey];
         const auto state = maskStates.find(cacheKey);
         if (!mask || state == maskStates.end() || state->second.spotlight != expected.spotlight || state->second.outputSize != expected.outputSize ||
-            state->second.cursor != expected.cursor || state->second.revealEnabled != expected.revealEnabled) {
+            state->second.cursor != expected.cursor || state->second.revealEnabled != expected.revealEnabled || state->second.transform != expected.transform) {
             mask = createMaskTexture(monitor, plan, profile, revealEnabled);
             maskStates.insert_or_assign(cacheKey, expected);
         }
@@ -617,6 +666,13 @@ struct Adapter::Impl {
     }
 
     void uploadPendingTextures() {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto iterator = replacementFades.begin(); iterator != replacementFades.end();) {
+            if (now - iterator->second.started >= 120ms)
+                iterator = replacementFades.erase(iterator);
+            else
+                ++iterator;
+        }
         for (auto& request : cache.takeUploads(1)) {
             const auto texture = g_pHyprRenderer->createTexture(
                 DRM_FORMAT_ABGR8888,
@@ -630,7 +686,8 @@ struct Adapter::Impl {
                 continue;
             }
             const auto bytes = static_cast<std::size_t>(request.image.stride) * request.image.height;
-            (void)cache.completeUpload(request, wrapTexture(texture), bytes);
+            if (cache.completeUpload(request, wrapTexture(texture), bytes) && request.previousTexture)
+                replacementFades.insert_or_assign(request.path, ReplacementFade{request.previousTexture, now});
         }
         if (cache.hasPendingUploads())
             damageManagedOutputs();
@@ -722,6 +779,13 @@ struct Adapter::Impl {
         if (!plan)
             return;
 
+        for (auto iterator = replacementFades.begin(); iterator != replacementFades.end();) {
+            if (now - iterator->second.started >= 120ms)
+                iterator = replacementFades.erase(iterator);
+            else
+                ++iterator;
+        }
+
         std::set<std::filesystem::path> pinned;
         const auto plans = engine.plans();
         for (const auto& other : plans)
@@ -755,6 +819,20 @@ struct Adapter::Impl {
 
         const CBox outputBox{{0.0, 0.0}, monitor->m_transformedSize};
         const auto currentTexture = unwrapTexture(wallpaper);
+        std::optional<float> replacementProgress;
+        SP<Render::ITexture> replacementTexture;
+        if (!plan->transitioning && !selectedWallpaperPath.empty()) {
+            if (const auto replacement = replacementFades.find(selectedWallpaperPath); replacement != replacementFades.end()) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - replacement->second.started);
+                const auto progress = std::clamp(static_cast<float>(elapsed.count()) / 120.F, 0.F, 1.F);
+                if (progress < 1.F) {
+                    replacementProgress = progress;
+                    replacementTexture = unwrapTexture(replacement->second.previousTexture);
+                } else {
+                    replacementFades.erase(replacement);
+                }
+            }
+        }
         CRectPassElement::SRectData baseData{};
         baseData.box = outputBox;
         baseData.color = hyprColor(plan->fallbackColor);
@@ -808,7 +886,12 @@ struct Adapter::Impl {
                 lastWallpaperTextures[monitor->m_name] = LastWallpaper{plan->previousProfile->wallpaper, *plan->previousProfile};
         } else if (currentTexture) {
             lastWallpaperTextures[monitor->m_name] = LastWallpaper{selectedWallpaperPath, plan->profile};
-            drawWallpaperTexture(monitor, currentTexture, plan->profile);
+            if (replacementProgress && replacementTexture) {
+                drawWallpaperTexture(monitor, replacementTexture, plan->profile, 1.F - *replacementProgress);
+                drawWallpaperTexture(monitor, currentTexture, plan->profile, *replacementProgress);
+            } else {
+                drawWallpaperTexture(monitor, currentTexture, plan->profile);
+            }
         } else if (destinationSnapshot.status != ImageStatus::Failed) {
             const auto previous = lastWallpaperTextures.find(monitor->m_name);
             if (previous != lastWallpaperTextures.end()) {
@@ -854,7 +937,7 @@ struct Adapter::Impl {
                 drawMask(plan->profile, 1.F, "current");
             }
         }
-        if (plan->transitioning && !Fullscreen::controller()->hasFullscreen(monitor))
+        if ((plan->transitioning || replacementProgress) && !Fullscreen::controller()->hasFullscreen(monitor))
             g_pHyprRenderer->damageMonitor(monitor);
     }
 };

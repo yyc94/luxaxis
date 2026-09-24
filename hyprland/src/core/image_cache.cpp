@@ -129,7 +129,7 @@ std::vector<UploadRequest> ImageCache::takeUploads(const std::size_t maxCount) {
             break;
         if (entry.status != ImageStatus::AwaitingUpload || !entry.decoded)
             continue;
-        result.push_back({path, entry.generation, std::move(*entry.decoded)});
+        result.push_back({path, entry.generation, std::move(*entry.decoded), entry.texture});
         entry.decoded.reset();
         entry.status = ImageStatus::Loading;
     }

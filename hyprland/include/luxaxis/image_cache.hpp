@@ -42,6 +42,7 @@ struct UploadRequest {
     std::filesystem::path path;
     std::uint64_t generation = 0;
     DecodedImage image;
+    TextureHandle previousTexture;
 };
 
 struct ImageSnapshot {

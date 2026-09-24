@@ -66,6 +66,14 @@ double triangleSignedDistance(const Vec2 point, const Vec2 a, const Vec2 b, cons
     return pointInTriangle(point, a, b, c) ? -distance : distance;
 }
 
+Rect clippedBounds(const Vec2 minimum, const Vec2 maximum, const Vec2 outputSize) {
+    const auto left = std::clamp(minimum.x, 0.0, outputSize.x);
+    const auto top = std::clamp(minimum.y, 0.0, outputSize.y);
+    const auto right = std::clamp(maximum.x, 0.0, outputSize.x);
+    const auto bottom = std::clamp(maximum.y, 0.0, outputSize.y);
+    return {{left, top}, {std::max(0.0, right - left), std::max(0.0, bottom - top)}};
+}
+
 double circleReveal(const SpotlightSample& sample, const Vec2 point) {
     const auto shortEdge = std::min(sample.outputSize.x, sample.outputSize.y);
     const auto radius = sample.spotlight.radius.resolve(shortEdge);
@@ -119,6 +127,61 @@ Vec2 resolveFanDirection(const Vec2 anchor, const Vec2 cursor, const Vec2 previo
     if (lengthOf(delta) > EPSILON)
         return normalizeOr(delta, {0.0, 1.0});
     return normalizeOr(previousDirection, {0.0, 1.0});
+}
+
+std::optional<Rect> spotlightEffectBounds(const SpotlightSample& sample) {
+    if (sample.spotlight.type == SpotlightType::None || !sample.revealEnabled || sample.outputSize.x <= 0.0 || sample.outputSize.y <= 0.0)
+        return std::nullopt;
+
+    const auto shortEdge = std::min(sample.outputSize.x, sample.outputSize.y);
+    const auto softness = sample.spotlight.softness.resolve(shortEdge);
+    Vec2 minimum = sample.cursor;
+    Vec2 maximum = sample.cursor;
+    switch (sample.spotlight.type) {
+        case SpotlightType::Circle: {
+            const auto extent = sample.spotlight.radius.resolve(shortEdge) + softness;
+            minimum = {sample.cursor.x - extent, sample.cursor.y - extent};
+            maximum = {sample.cursor.x + extent, sample.cursor.y + extent};
+            break;
+        }
+        case SpotlightType::Strip: {
+            const auto extent = sample.spotlight.thickness.resolve(shortEdge) * 0.5 + softness;
+            if (sample.spotlight.orientation == StripOrientation::Horizontal) {
+                minimum = {0.0, sample.cursor.y - extent};
+                maximum = {sample.outputSize.x, sample.cursor.y + extent};
+            } else {
+                minimum = {sample.cursor.x - extent, 0.0};
+                maximum = {sample.cursor.x + extent, sample.outputSize.y};
+            }
+            break;
+        }
+        case SpotlightType::Fan: {
+            const auto radius = sample.spotlight.radius.resolve(shortEdge);
+            const auto longitudinalRadius = radius * sample.spotlight.aspectRatio;
+            const auto anchor = Vec2{
+                sample.spotlight.anchor.x * sample.outputSize.x,
+                sample.spotlight.anchor.y * sample.outputSize.y,
+            };
+            // The direction can change between the damage event and the next
+            // render. Use the orientation-independent enclosing circle here so
+            // the damage never misses a newly rotated ellipse.
+            const auto ellipseExtent = std::max(radius, longitudinalRadius);
+            minimum = {
+                std::min(anchor.x, sample.cursor.x - ellipseExtent) - softness,
+                std::min(anchor.y, sample.cursor.y - ellipseExtent) - softness,
+            };
+            maximum = {
+                std::max(anchor.x, sample.cursor.x + ellipseExtent) + softness,
+                std::max(anchor.y, sample.cursor.y + ellipseExtent) + softness,
+            };
+            break;
+        }
+        case SpotlightType::None:
+            return std::nullopt;
+    }
+
+    const auto result = clippedBounds(minimum, maximum, sample.outputSize);
+    return result.size.x > 0.0 && result.size.y > 0.0 ? std::optional{result} : std::nullopt;
 }
 
 double revealAt(const SpotlightSample& sample, const Vec2 point) {

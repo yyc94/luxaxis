@@ -95,6 +95,24 @@ void inactiveOutputKeepsMaskWithoutReveal() {
     near(shaded.b, 0.1, 0.0001, "mask color blend was incorrect");
 }
 
+void effectBoundsCoverTheChangedRevealRegion() {
+    auto circle = base(luxaxis::SpotlightType::Circle);
+    circle.radius = {100.0, luxaxis::LengthUnit::Pixels};
+    circle.softness = {10.0, luxaxis::LengthUnit::Pixels};
+    const luxaxis::SpotlightSample sample{.spotlight = circle, .outputSize = {1000.0, 800.0}, .cursor = {500.0, 400.0}};
+    const auto bounds = luxaxis::spotlightEffectBounds(sample);
+    require(bounds.has_value(), "circle did not produce effect bounds");
+    require(bounds->position == luxaxis::Vec2{390.0, 290.0} && bounds->size == luxaxis::Vec2{220.0, 220.0}, "circle bounds were incorrect");
+
+    auto strip = base(luxaxis::SpotlightType::Strip);
+    strip.thickness = {20.0, luxaxis::LengthUnit::Pixels};
+    strip.softness = {5.0, luxaxis::LengthUnit::Pixels};
+    strip.orientation = luxaxis::StripOrientation::Horizontal;
+    const luxaxis::SpotlightSample stripSample{.spotlight = strip, .outputSize = {1000.0, 800.0}, .cursor = {500.0, 400.0}};
+    const auto stripBounds = luxaxis::spotlightEffectBounds(stripSample);
+    require(stripBounds && stripBounds->position == luxaxis::Vec2{0.0, 385.0} && stripBounds->size == luxaxis::Vec2{1000.0, 30.0}, "strip bounds were incorrect");
+}
+
 } // namespace
 
 int main() {
@@ -105,6 +123,7 @@ int main() {
         fanIsTriangleUnionCursorEllipse();
         fanDegeneracyPreservesDirection();
         inactiveOutputKeepsMaskWithoutReveal();
+        effectBoundsCoverTheChangedRevealRegion();
     } catch (const std::exception& error) {
         std::cerr << "spotlight_test: " << error.what() << '\n';
         return EXIT_FAILURE;
