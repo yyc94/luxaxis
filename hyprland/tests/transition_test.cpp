@@ -35,6 +35,8 @@ void allTransitionTypesReachDestination() {
 void easingIsBounded() {
     require(luxaxis::easeProgress(0.5, "ease-in") < 0.5, "ease-in was not accelerating");
     require(luxaxis::easeProgress(0.5, "ease-out") > 0.5, "ease-out was not decelerating");
+    require(luxaxis::easeProgress(0.5, "ease-in") == 0.125 && luxaxis::easeProgress(0.5, "ease-out") == 0.875,
+            "easing did not use the expected cubic curve");
     require(luxaxis::easeProgress(-1.0, "linear") == 0.0 && luxaxis::easeProgress(2.0, "linear") == 1.0, "easing was not bounded");
 }
 

@@ -841,10 +841,32 @@ struct Adapter::Impl {
             const auto oldTexture = unwrapTexture(wallpaperTexture({plan->previousProfile->wallpaper}));
             const auto sameWallpaper = plan->previousProfile->wallpaper == plan->profile.wallpaper;
             if (sameWallpaper) {
-                if (currentTexture)
+                if (plan->interruptedSourceProfile) {
+                    const auto sourceTexture = unwrapTexture(wallpaperTexture({plan->interruptedSourceProfile->wallpaper}));
+                    if (sourceTexture)
+                        drawWallpaperTexture(monitor, sourceTexture, *plan->interruptedSourceProfile);
+                    if (oldTexture) {
+                        if (plan->interruptedTransition.type == TransitionType::Fade)
+                            drawWallpaperTexture(
+                                monitor, oldTexture, *plan->previousProfile, static_cast<float>(plan->interruptedProgress));
+                        else
+                            drawWallpaperTexture(
+                                monitor,
+                                oldTexture,
+                                *plan->previousProfile,
+                                1.F,
+                                transitionClip(
+                                    plan->interruptedTransition,
+                                    plan->interruptedProgress,
+                                    plan->interruptedOrigin,
+                                    monitor->m_size,
+                                    monitor->m_scale));
+                    }
+                } else if (currentTexture) {
                     drawWallpaperTexture(monitor, currentTexture, plan->profile);
-                else if (oldTexture)
+                } else if (oldTexture) {
                     drawWallpaperTexture(monitor, oldTexture, *plan->previousProfile);
+                }
             } else {
                 if (plan->interruptedSourceProfile) {
                     const auto sourceTexture = unwrapTexture(wallpaperTexture({plan->interruptedSourceProfile->wallpaper}));

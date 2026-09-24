@@ -17,11 +17,11 @@ double distance(Vec2 a, Vec2 b) {
 double easeProgress(const double progress, const std::string_view easing) {
     const auto p = std::clamp(progress, 0.0, 1.0);
     if (easing == "ease-in")
-        return p * p;
+        return p * p * p;
     if (easing == "ease-out")
-        return 1.0 - (1.0 - p) * (1.0 - p);
+        return 1.0 - (1.0 - p) * (1.0 - p) * (1.0 - p);
     if (easing == "ease-in-out")
-        return p < 0.5 ? 2.0 * p * p : 1.0 - std::pow(-2.0 * p + 2.0, 2.0) / 2.0;
+        return p < 0.5 ? 4.0 * p * p * p : 1.0 - std::pow(-2.0 * p + 2.0, 3.0) / 2.0;
     return p;
 }
 
