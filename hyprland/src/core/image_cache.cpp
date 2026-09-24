@@ -22,7 +22,8 @@ std::optional<std::string> validate(const DecodedImage& image) {
 
 } // namespace
 
-ImageCache::ImageCache(const std::size_t budgetBytes, ImageDecoder decoder) : decoder_(std::move(decoder)), budgetBytes_(budgetBytes) {
+ImageCache::ImageCache(const std::size_t budgetBytes, ImageDecoder decoder, ImageReadyCallback readyCallback)
+    : decoder_(std::move(decoder)), readyCallback_(std::move(readyCallback)), budgetBytes_(budgetBytes) {
     worker_ = std::thread([this] { workerLoop(); });
 }
 
@@ -69,6 +70,7 @@ bool ImageCache::enqueue(const std::filesystem::path& path, const bool force) {
 void ImageCache::workerLoop() {
     while (true) {
         DecodeJob job;
+        bool ready = false;
         {
             std::unique_lock lock{mutex_};
             wake_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
@@ -98,18 +100,23 @@ void ImageCache::workerLoop() {
                 if (!decoded) {
                     entry.status = entry.texture ? ImageStatus::Ready : ImageStatus::Failed;
                     entry.error = decoded.error().message;
+                    ready = true;
                 } else if (const auto error = validate(decoded.value())) {
                     entry.status = entry.texture ? ImageStatus::Ready : ImageStatus::Failed;
                     entry.error = *error;
+                    ready = true;
                 } else {
                     entry.decoded = std::move(decoded.value());
                     entry.status = ImageStatus::AwaitingUpload;
                     entry.error.clear();
+                    ready = true;
                 }
             }
             if (jobs_.empty() && activeJobs_ == 0)
                 idle_.notify_all();
         }
+        if (ready && readyCallback_)
+            readyCallback_();
     }
 }
 

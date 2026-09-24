@@ -27,6 +27,7 @@ struct DecodedImage {
 };
 
 using ImageDecoder = std::function<Result<DecodedImage>(const std::filesystem::path&)>;
+using ImageReadyCallback = std::function<void()>;
 using TextureHandle = std::shared_ptr<void>;
 
 enum class ImageStatus : std::uint8_t {
@@ -54,7 +55,7 @@ struct ImageSnapshot {
 
 class ImageCache {
   public:
-    ImageCache(std::size_t budgetBytes, ImageDecoder decoder);
+    ImageCache(std::size_t budgetBytes, ImageDecoder decoder, ImageReadyCallback readyCallback = {});
     ~ImageCache();
 
     ImageCache(const ImageCache&) = delete;
@@ -103,6 +104,7 @@ class ImageCache {
     std::set<std::filesystem::path> pinnedPaths_;
     std::deque<DecodeJob> jobs_;
     ImageDecoder decoder_;
+    ImageReadyCallback readyCallback_;
     std::thread worker_;
     std::size_t budgetBytes_ = 0;
     std::size_t residentBytes_ = 0;

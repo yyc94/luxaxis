@@ -21,18 +21,23 @@
 
 #include <hyprgraphics/image/Image.hpp>
 #include <drm_fourcc.h>
+#include <wayland-server-core.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <fcntl.h>
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <system_error>
 #include <thread>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -128,6 +133,56 @@ Spotlight interpolateSpotlight(const Spotlight& from, const Spotlight& to, const
     return result;
 }
 
+class MainThreadWake {
+  public:
+    explicit MainThreadWake(std::function<void()> callback) : callback_(std::move(callback)) {
+        if (pipe2(fds_, O_NONBLOCK | O_CLOEXEC) != 0)
+            throw std::system_error(errno, std::generic_category(), "failed to create Luxaxis wake pipe");
+        source_ = wl_event_loop_add_fd(
+            g_pCompositor->m_wlEventLoop,
+            fds_[0],
+            WL_EVENT_READABLE,
+            [](int fd, uint32_t, void* data) {
+                auto* wake = static_cast<MainThreadWake*>(data);
+                std::uint8_t buffer[64];
+                while (read(fd, buffer, sizeof(buffer)) > 0) {
+                }
+                if (wake->callback_)
+                    wake->callback_();
+                return 0;
+            },
+            this);
+        if (!source_) {
+            close(fds_[0]);
+            close(fds_[1]);
+            fds_[0] = -1;
+            fds_[1] = -1;
+            throw std::runtime_error("failed to register Luxaxis wake source");
+        }
+    }
+
+    ~MainThreadWake() {
+        if (source_)
+            wl_event_source_remove(source_);
+        if (fds_[0] >= 0)
+            close(fds_[0]);
+        if (fds_[1] >= 0)
+            close(fds_[1]);
+    }
+
+    void signal() const {
+        if (fds_[1] < 0)
+            return;
+        const std::uint8_t byte = 1;
+        (void)write(fds_[1], &byte, sizeof(byte));
+    }
+
+  private:
+    int fds_[2] = {-1, -1};
+    wl_event_source* source_ = nullptr;
+    std::function<void()> callback_;
+};
+
 Config fallbackConfig() {
     Config config;
     config.defaultProfile = "default";
@@ -150,7 +205,8 @@ CHyprColor hyprColor(const Color color, const float alpha = 1.F) {
 
 class ConfigWatcher {
   public:
-    ConfigWatcher(std::filesystem::path source, std::filesystem::path home) : source_(std::move(source)), home_(std::move(home)) {
+    ConfigWatcher(std::filesystem::path source, std::filesystem::path home, std::function<void()> wake = {})
+        : source_(std::move(source)), home_(std::move(home)), wake_(std::move(wake)) {
         thread_ = std::thread([this] { run(); });
     }
 
@@ -202,6 +258,8 @@ class ConfigWatcher {
                     pending_ = std::move(loaded.value());
                 else
                     error_ = loaded.error();
+                if (wake_)
+                    wake_();
             }
             std::this_thread::sleep_for(300ms);
         }
@@ -215,6 +273,7 @@ class ConfigWatcher {
     std::mutex mutex_;
     std::optional<Config> pending_;
     std::optional<Error> error_;
+    std::function<void()> wake_;
 };
 
 std::set<std::filesystem::path> wallpaperPaths(const Config& config) {
@@ -228,7 +287,8 @@ std::set<std::filesystem::path> wallpaperPaths(const Config& config) {
 
 class WallpaperWatcher {
   public:
-    WallpaperWatcher(ImageCache& cache, const Config& config) : cache_(cache), paths_(wallpaperPaths(config)) {
+    WallpaperWatcher(ImageCache& cache, const Config& config, std::function<void()> wake = {})
+        : cache_(cache), paths_(wallpaperPaths(config)), wake_(std::move(wake)) {
         thread_ = std::thread([this] { run(); });
     }
 
@@ -270,6 +330,8 @@ class WallpaperWatcher {
                 } else if (entry->second != currentTime) {
                     (void)cache_.refresh(path);
                     entry->second = currentTime;
+                    if (wake_)
+                        wake_();
                 }
             }
             std::this_thread::sleep_for(300ms);
@@ -281,6 +343,7 @@ class WallpaperWatcher {
     std::thread thread_;
     std::atomic<bool> stopping_{false};
     std::mutex mutex_;
+    std::function<void()> wake_;
 };
 
 } // namespace
@@ -291,6 +354,7 @@ struct Adapter::Impl {
     std::filesystem::path home;
     Config config;
     Engine engine;
+    MainThreadWake wake;
     ImageCache cache;
     ConfigWatcher watcher;
     WallpaperWatcher wallpaperWatcher;
@@ -300,7 +364,7 @@ struct Adapter::Impl {
     std::unordered_map<std::string, std::uint64_t> maskRevisions;
     std::unordered_map<std::string, Vec2> fanDirections;
     struct LastWallpaper {
-        SP<Render::ITexture> texture;
+        std::filesystem::path path;
         Profile profile;
     };
     std::unordered_map<std::string, LastWallpaper> lastWallpaperTextures;
@@ -318,7 +382,10 @@ struct Adapter::Impl {
 
     Impl(HANDLE pluginHandle, std::filesystem::path source, std::filesystem::path homePath, Config initial)
         : handle(pluginHandle), configPath(std::move(source)), home(std::move(homePath)), config(std::move(initial)), engine(config),
-          cache(config.textureCacheBytes, decodeImage), watcher(configPath, home), wallpaperWatcher(cache, config) {
+          wake([this] { scheduleManagedFrames(); }),
+          cache(config.textureCacheBytes, decodeImage, [this] { wake.signal(); }),
+          watcher(configPath, home, [this] { wake.signal(); }),
+          wallpaperWatcher(cache, config, [this] { wake.signal(); }) {
         syncOutputs();
 
         renderStage = Event::bus()->m_events.render.stage.listen([this](eRenderStage stage) {
@@ -412,6 +479,10 @@ struct Adapter::Impl {
                 g_pHyprRenderer->damageMonitor(monitor);
     }
 
+    void scheduleManagedFrames() {
+        damageManagedOutputs();
+    }
+
     void damageOutput(const std::string& name) {
         for (const auto& monitor : State::monitorState()->monitors())
             if (monitor && monitor->m_name == name && !Fullscreen::controller()->hasFullscreen(monitor) && engine.planFor(name)) {
@@ -491,7 +562,7 @@ struct Adapter::Impl {
         return mask;
     }
 
-    TextureHandle wallpaperTexture(const std::vector<std::filesystem::path>& candidates) {
+    TextureHandle wallpaperTexture(const std::vector<std::filesystem::path>& candidates, std::filesystem::path* selectedPath = nullptr) {
         for (const auto& candidate : candidates) {
             const auto snapshot = cache.snapshot(candidate);
             if (!snapshot.error.empty()) {
@@ -500,8 +571,11 @@ struct Adapter::Impl {
             } else {
                 reportedImageErrors.erase(candidate);
             }
-            if (auto current = cache.texture(candidate))
+            if (auto current = cache.texture(candidate)) {
+                if (selectedPath)
+                    *selectedPath = candidate;
                 return current;
+            }
             (void)cache.request(candidate);
         }
         return {};
@@ -590,19 +664,26 @@ struct Adapter::Impl {
             if (other.previousProfile)
                 pinned.insert(other.previousProfile->wallpaper);
         }
+        for (const auto& [unused, last] : lastWallpaperTextures) {
+            (void)unused;
+            pinned.insert(last.path);
+        }
         cache.setPinned(pinned);
 
         // During a transition, only the destination image may replace the
         // source. A default-profile fallback is allowed once the transition
         // has finished, but must not make a missing destination flash early.
         TextureHandle wallpaper;
+        std::filesystem::path selectedWallpaperPath;
         const auto destinationSnapshot = cache.snapshot(plan->profile.wallpaper);
         if (plan->transitioning) {
-            wallpaper = wallpaperTexture({plan->profile.wallpaper});
+            wallpaper = wallpaperTexture({plan->profile.wallpaper}, &selectedWallpaperPath);
         } else {
-            wallpaper = wallpaperTexture({plan->profile.wallpaper});
+            wallpaper = wallpaperTexture({plan->profile.wallpaper}, &selectedWallpaperPath);
             if (!wallpaper && destinationSnapshot.status == ImageStatus::Failed)
-                wallpaper = wallpaperTexture(plan->wallpaperCandidates.size() > 1 ? std::vector{plan->wallpaperCandidates[1]} : std::vector<std::filesystem::path>{});
+                wallpaper = wallpaperTexture(
+                    plan->wallpaperCandidates.size() > 1 ? std::vector{plan->wallpaperCandidates[1]} : std::vector<std::filesystem::path>{},
+                    &selectedWallpaperPath);
         }
 
         const CBox outputBox{{0.0, 0.0}, monitor->m_transformedSize};
@@ -657,14 +738,16 @@ struct Adapter::Impl {
                 }
             }
             if (!currentTexture && oldTexture)
-                lastWallpaperTextures[monitor->m_name] = LastWallpaper{oldTexture, *plan->previousProfile};
+                lastWallpaperTextures[monitor->m_name] = LastWallpaper{plan->previousProfile->wallpaper, *plan->previousProfile};
         } else if (currentTexture) {
-            lastWallpaperTextures[monitor->m_name] = LastWallpaper{currentTexture, plan->profile};
+            lastWallpaperTextures[monitor->m_name] = LastWallpaper{selectedWallpaperPath, plan->profile};
             drawWallpaperTexture(monitor, currentTexture, plan->profile);
         } else if (destinationSnapshot.status != ImageStatus::Failed) {
             const auto previous = lastWallpaperTextures.find(monitor->m_name);
-            if (previous != lastWallpaperTextures.end())
-                drawWallpaperTexture(monitor, previous->second.texture, previous->second.profile);
+            if (previous != lastWallpaperTextures.end()) {
+                if (const auto texture = unwrapTexture(wallpaperTexture({previous->second.path})))
+                    drawWallpaperTexture(monitor, texture, previous->second.profile);
+            }
         }
 
         if (plan->maskEnabled) {
