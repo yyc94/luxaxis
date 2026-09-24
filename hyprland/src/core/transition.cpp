@@ -37,16 +37,17 @@ double transitionReveal(const Transition& transition, const double progress, con
         case TransitionType::Fade:
             return p;
         case TransitionType::Wipe: {
-            const auto edge = outputSize.x * p;
-            return point.x <= edge ? 1.0 : 0.0;
+            const auto fromRight = origin.x > outputSize.x * 0.5;
+            const auto edge = fromRight ? outputSize.x * (1.0 - p) : outputSize.x * p;
+            return fromRight ? (point.x >= edge ? 1.0 : 0.0) : (point.x <= edge ? 1.0 : 0.0);
         }
         case TransitionType::Grow:
             return distance(point, origin) <= maxRadius * p ? 1.0 : 0.0;
         case TransitionType::Outer: {
-            const auto left = outputSize.x * p;
-            const auto right = outputSize.x * (1.0 - p);
-            const auto top = outputSize.y * p;
-            const auto bottom = outputSize.y * (1.0 - p);
+            const auto left = origin.x * p;
+            const auto right = origin.x + (outputSize.x - origin.x) * (1.0 - p);
+            const auto top = origin.y * p;
+            const auto bottom = origin.y + (outputSize.y - origin.y) * (1.0 - p);
             return point.x <= left || point.x >= right || point.y <= top || point.y >= bottom ? 1.0 : 0.0;
         }
         case TransitionType::Clock: {

@@ -376,7 +376,8 @@ Config validate(const toml::table& root, const std::filesystem::path& home) {
             fail("workspaces." + std::string{raw}, "expected a profile name");
         if (!result.profiles.contains(*profileName))
             fail("workspaces." + std::string{raw}, "references missing profile '" + *profileName + "'");
-        result.workspaces.emplace(id, *profileName);
+        if (!result.workspaces.emplace(id, *profileName).second)
+            fail("workspaces." + std::string{raw}, "duplicate workspace ID after numeric normalization");
     }
     return result;
 }

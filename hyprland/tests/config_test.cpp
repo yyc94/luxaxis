@@ -106,6 +106,11 @@ void strictValidationRejectsInvalidCandidates() {
     unknownTransitionField.insert(unknownTransitionField.find("[profiles.default]"), "[transition]\ntype = \"fade\"\npoint = [0.2, 0.3]\n\n");
     parsed = luxaxis::parseConfig(unknownTransitionField, "/config/luxaxis.toml", "/home/tester");
     require(!parsed && parsed.error().message.contains("unknown field 'point'"), "unknown transition field was accepted");
+
+    auto duplicateWorkspace = std::string{VALID_CONFIG};
+    duplicateWorkspace.insert(duplicateWorkspace.find("\"2\" = \"focus\""), "\"01\" = \"default\"\n");
+    parsed = luxaxis::parseConfig(duplicateWorkspace, "/config/luxaxis.toml", "/home/tester");
+    require(!parsed && parsed.error().message.contains("duplicate workspace ID"), "normalized duplicate workspace was accepted");
 }
 
 void invalidReplacementPreservesActiveConfig() {

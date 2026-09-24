@@ -58,6 +58,10 @@ void engineInterruptsInsteadOfQueueing() {
     const auto interrupted = engine.planFor("DP-1");
     require(interrupted->transition.type == luxaxis::TransitionType::Wipe, "destination did not own interrupted transition");
     require(interrupted->previousProfile && interrupted->previousProfile->wallpaper == "/wall/one.png", "interruption did not capture current destination");
+    require(interrupted->interruptedSourceProfile && interrupted->interruptedSourceProfile->wallpaper == "/wall/default.png",
+            "interruption did not retain the in-flight source profile");
+    require(interrupted->interruptedProgress > 0.0 && interrupted->interruptedProgress < 1.0,
+            "interruption did not retain the in-flight progress");
     engine.advance(std::chrono::milliseconds{100});
     require(!engine.planFor("DP-1")->transitioning, "transition did not complete");
 }

@@ -21,22 +21,26 @@ struct OutputState {
 };
 
 struct RenderPlan {
-    std::string output;
-    Rect logicalBounds;
-    std::optional<std::int64_t> workspace;
-    std::string profileName;
-    Profile profile;
-    std::optional<Profile> previousProfile;
-    std::vector<std::filesystem::path> wallpaperCandidates;
-    Color fallbackColor;
-    Vec2 cursorLocal;
-    bool maskEnabled = false;
-    bool revealEnabled = false;
-    Transition transition{};
-    double transitionProgress = 1.0;
-    Vec2 transitionOrigin{};
-    bool transitioning = false;
-    std::uint64_t revision = 0;
+    const std::string output;
+    const Rect logicalBounds;
+    const std::optional<std::int64_t> workspace;
+    const std::string profileName;
+    const Profile profile;
+    const std::optional<Profile> previousProfile;
+    const std::optional<Profile> interruptedSourceProfile;
+    const std::vector<std::filesystem::path> wallpaperCandidates;
+    const Color fallbackColor;
+    const Vec2 cursorLocal;
+    const bool maskEnabled;
+    const bool revealEnabled;
+    const Transition transition;
+    const double transitionProgress;
+    const Vec2 transitionOrigin;
+    const Transition interruptedTransition;
+    const double interruptedProgress;
+    const Vec2 interruptedOrigin;
+    const bool transitioning;
+    const std::uint64_t revision;
 
     friend bool operator==(const RenderPlan&, const RenderPlan&) = default;
 };
@@ -66,6 +70,7 @@ class Engine {
 
   private:
     [[nodiscard]] std::pair<std::string, const Profile&> resolveProfile(std::optional<std::int64_t> workspace) const;
+    [[nodiscard]] Vec2 transitionOrigin(const Transition& transition, const OutputState& output) const;
     void startTransition(const std::string& output, std::optional<std::int64_t> oldWorkspace, std::optional<std::int64_t> newWorkspace);
     void changed();
 
@@ -80,6 +85,10 @@ class Engine {
         Profile previousProfile;
         Transition transition;
         std::chrono::milliseconds elapsed{};
+        std::optional<Profile> interruptedSourceProfile;
+        Transition interruptedTransition{};
+        double interruptedProgress = 0.0;
+        Vec2 interruptedOrigin{};
         bool active = false;
     };
     std::map<std::string, TransitionState> transitions_;
