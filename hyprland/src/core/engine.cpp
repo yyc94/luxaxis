@@ -132,6 +132,12 @@ void Engine::advance(const std::chrono::milliseconds elapsed) {
         }
         changedState = true;
     }
+    for (auto iterator = transitions_.begin(); iterator != transitions_.end();) {
+        if (!iterator->second.active)
+            iterator = transitions_.erase(iterator);
+        else
+            ++iterator;
+    }
     if (changedState)
         changed();
 }
