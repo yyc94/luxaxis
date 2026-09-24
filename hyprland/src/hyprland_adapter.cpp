@@ -84,9 +84,10 @@ Result<DecodedImage> decodeImage(const std::filesystem::path& path) {
     if (width == 0 || height == 0 || width > std::numeric_limits<std::uint32_t>::max() / 4U || sourceStride <= 0)
         return Error{path.string(), "decoder returned an invalid Cairo surface"};
     const auto minimumStride = static_cast<std::uint64_t>(width) * 4ULL;
+    if (static_cast<std::uint64_t>(sourceStride) < minimumStride || static_cast<std::uint64_t>(height) > std::numeric_limits<std::uint64_t>::max() / minimumStride)
+        return Error{path.string(), "decoder returned an invalid Cairo surface"};
     const auto pixelBytes = minimumStride * static_cast<std::uint64_t>(height);
-    if (static_cast<std::uint64_t>(sourceStride) < minimumStride || pixelBytes / minimumStride != height ||
-        pixelBytes > std::numeric_limits<std::size_t>::max())
+    if (pixelBytes > std::numeric_limits<std::size_t>::max())
         return Error{path.string(), "decoder returned an invalid Cairo surface"};
 
     DecodedImage result{
@@ -690,7 +691,7 @@ struct Adapter::Impl {
                 (void)cache.failUpload(request, "Hyprland rejected the wallpaper texture upload");
                 continue;
             }
-            const auto bytes = static_cast<std::size_t>(request.image.stride) * request.image.height;
+            const auto bytes = static_cast<std::size_t>(request.image.stride) * static_cast<std::size_t>(request.image.height);
             if (cache.completeUpload(request, wrapTexture(texture), bytes) && request.previousTexture)
                 replacementFades.insert_or_assign(request.path, ReplacementFade{request.previousTexture, now});
         }
