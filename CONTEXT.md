@@ -53,3 +53,21 @@ A bounded animation from the current composited wallpaper state to a newly
 activated workspace profile. It is distinct from Spotlight movement and active
 output changes.
 _Avoid_: Workspace animation
+
+## Current Repository State
+
+The user-facing deployment guide is available at `README.md`. It documents the
+two independent deliverables separately:
+
+- The Noctalia plugin provides the workspace bar widget and style panel.
+- The Hyprland plugin provides workspace-bound wallpapers, masks, Spotlights,
+  and optional transitions.
+
+The guide includes installation, activation, configuration, multi-output
+behavior, temporary controls, conflict warnings for other wallpaper owners,
+and removal instructions. It intentionally does not describe internal module
+design or development workflow.
+
+The guide was added in commit `a090bf3` (`docs: add user deployment guide`).
+The repository was clean after that commit; future changes should preserve the
+independent installation and runtime boundaries between the two plugins.
