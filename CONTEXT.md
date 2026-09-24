@@ -69,5 +69,14 @@ and removal instructions. It intentionally does not describe internal module
 design or development workflow.
 
 The guide was added in commit `a090bf3` (`docs: add user deployment guide`).
-The repository was clean after that commit; future changes should preserve the
-independent installation and runtime boundaries between the two plugins.
+The Noctalia wallpaper section was verified against the official Noctalia
+commit `58f71922`: users can disable the service in Settings or set
+`[wallpaper] enabled = false`, then run `noctalia msg config-reload`.
+
+Luxaxis Spotlight masks use the fixed `mask_color` and `mask_opacity` from
+each workspace profile. Luxaxis does not extract wallpaper colors or choose a
+mask color automatically. The corresponding deployment-guide update is in
+commit `9df46d0` (`docs: document disabling Noctalia wallpaper`).
+
+Future changes should preserve the independent installation and runtime
+boundaries between the two plugins.
