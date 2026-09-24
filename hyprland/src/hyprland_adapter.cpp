@@ -465,12 +465,16 @@ struct Adapter::Impl {
 
     TextureHandle wallpaperTexture(const std::vector<std::filesystem::path>& candidates) {
         for (const auto& candidate : candidates) {
+            const auto snapshot = cache.snapshot(candidate);
+            if (!snapshot.error.empty()) {
+                if (reportedImageErrors.insert(candidate).second)
+                    Log::logger->log(Log::ERR, "Luxaxis wallpaper {}: {}", candidate.string(), snapshot.error);
+            } else {
+                reportedImageErrors.erase(candidate);
+            }
             if (auto current = cache.texture(candidate))
                 return current;
             (void)cache.request(candidate);
-            const auto snapshot = cache.snapshot(candidate);
-            if (snapshot.status == ImageStatus::Failed && !snapshot.error.empty() && reportedImageErrors.insert(candidate).second)
-                Log::logger->log(Log::ERR, "Luxaxis wallpaper {}: {}", candidate.string(), snapshot.error);
         }
         return {};
     }
