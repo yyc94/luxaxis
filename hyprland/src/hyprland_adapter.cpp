@@ -592,7 +592,7 @@ struct Adapter::Impl {
         // Spotlight units and cursor coordinates are logical. The generated
         // mask is uploaded at the transformed pixel size and stretched by the
         // render pass, so geometry remains scale-independent.
-        const auto outputSize = Vec2{monitor->m_size.x, monitor->m_size.y};
+        const auto outputSize = plan.logicalBounds.size;
         if (!revealEnabled) {
             std::array pixels{
                 static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.r, 0.0, 1.0) * 255.0),
@@ -638,7 +638,7 @@ struct Adapter::Impl {
         if (profile.spotlight.type == SpotlightType::None)
             return {};
         const auto cacheKey = monitor->m_name + ":" + key;
-        const auto outputSize = Vec2{monitor->m_size.x, monitor->m_size.y};
+        const auto outputSize = plan.logicalBounds.size;
         const auto cursor = revealEnabled ? plan.cursorLocal : Vec2{};
         const MaskState expected{profile.spotlight, outputSize, cursor, revealEnabled, monitor->m_transform};
         auto& mask = maskTextures[cacheKey];
@@ -698,7 +698,7 @@ struct Adapter::Impl {
             damageManagedOutputs();
     }
 
-    CRegion transitionClip(const Transition& transition, const double progress, const Vec2 origin, const Vector2D logicalSize, const float scale) {
+    CRegion transitionClip(const Transition& transition, const double progress, const Vec2 origin, const Vec2 logicalSize, const float scale) {
         CRegion region;
         const auto eased = easeProgress(progress, transition.easing);
         const auto addLogicalBox = [&region, scale](const double x, const double y, const double width, const double height) {
@@ -864,7 +864,7 @@ struct Adapter::Impl {
                                     plan->interruptedTransition,
                                     plan->interruptedProgress,
                                     plan->interruptedOrigin,
-                                    monitor->m_size,
+                                    plan->logicalBounds.size,
                                     monitor->m_scale));
                     }
                 } else if (currentTexture) {
@@ -891,7 +891,7 @@ struct Adapter::Impl {
                                     plan->interruptedTransition,
                                     plan->interruptedProgress,
                                     plan->interruptedOrigin,
-                                    monitor->m_size,
+                                    plan->logicalBounds.size,
                                     monitor->m_scale));
                     }
                 } else if (oldTexture) {
@@ -906,7 +906,7 @@ struct Adapter::Impl {
                             currentTexture,
                             plan->profile,
                             1.F,
-                            transitionClip(plan->transition, plan->transitionProgress, plan->transitionOrigin, monitor->m_size, monitor->m_scale));
+                            transitionClip(plan->transition, plan->transitionProgress, plan->transitionOrigin, plan->logicalBounds.size, monitor->m_scale));
                 }
             }
             if (!currentTexture && oldTexture)
