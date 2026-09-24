@@ -1,6 +1,7 @@
 #include "luxaxis/engine.hpp"
 
 #include <algorithm>
+#include <random>
 #include <stdexcept>
 #include <utility>
 
@@ -27,7 +28,10 @@ bool Engine::upsertOutput(OutputState output) {
     const auto existing = outputs_.find(output.name);
     if (existing != outputs_.end() && existing->second == output)
         return false;
+    const auto oldWorkspace = existing == outputs_.end() ? std::optional<std::int64_t>{} : existing->second.workspace;
     outputs_.insert_or_assign(output.name, std::move(output));
+    if (existing != outputs_.end() && oldWorkspace != outputs_[existing->first].workspace)
+        startTransition(existing->first, oldWorkspace, outputs_[existing->first].workspace);
     changed();
     return true;
 }
@@ -37,6 +41,8 @@ bool Engine::removeOutput(const std::string& name) {
         return false;
     if (focusedOutput_ == name)
         focusedOutput_.reset();
+    transitions_.erase(name);
+    lastRandomTransitions_.erase(name);
     changed();
     return true;
 }
@@ -47,7 +53,9 @@ bool Engine::activateWorkspace(const std::string& output, const std::int64_t wor
     const auto found = outputs_.find(output);
     if (found == outputs_.end() || found->second.workspace == workspace)
         return false;
+    const auto oldWorkspace = found->second.workspace;
     found->second.workspace = workspace;
+    startTransition(output, oldWorkspace, found->second.workspace);
     changed();
     return true;
 }
@@ -77,6 +85,24 @@ bool Engine::setFocusedOutput(std::optional<std::string> output) {
     focusedOutput_ = std::move(output);
     changed();
     return true;
+}
+
+void Engine::advance(const std::chrono::milliseconds elapsed) {
+    if (elapsed.count() <= 0)
+        return;
+    bool changedState = false;
+    for (auto& [output, state] : transitions_) {
+        if (!state.active)
+            continue;
+        state.elapsed += elapsed;
+        if (state.elapsed.count() >= state.transition.durationMs) {
+            state.elapsed = std::chrono::milliseconds{state.transition.durationMs};
+            state.active = false;
+        }
+        changedState = true;
+    }
+    if (changedState)
+        changed();
 }
 
 void Engine::spotlightOn() {
@@ -142,13 +168,31 @@ std::optional<RenderPlan> Engine::planFor(const std::string& outputName) const {
         .workspace = output->second.workspace,
         .profileName = profileName,
         .profile = profile,
+        .previousProfile = std::nullopt,
         .wallpaperCandidates = {profile.wallpaper},
         .fallbackColor = config_.fallbackColor,
         .cursorLocal = {cursor_.x - output->second.logicalBounds.position.x, cursor_.y - output->second.logicalBounds.position.y},
         .maskEnabled = hasSpotlight,
         .revealEnabled = hasSpotlight && selectedOutput == outputName,
+        .transition = profile.transition.value_or(config_.transition.value_or(Transition{})),
+        .transitionProgress = 1.0,
+        .transitionOrigin = profile.transition.value_or(config_.transition.value_or(Transition{})).origin == TransitionOrigin::Center
+            ? Vec2{output->second.logicalBounds.size.x * 0.5, output->second.logicalBounds.size.y * 0.5}
+            : profile.transition.value_or(config_.transition.value_or(Transition{})).origin == TransitionOrigin::Point
+            ? Vec2{output->second.logicalBounds.size.x * profile.transition.value_or(config_.transition.value_or(Transition{})).point.x,
+                   output->second.logicalBounds.size.y * profile.transition.value_or(config_.transition.value_or(Transition{})).point.y}
+            : Vec2{cursor_.x - output->second.logicalBounds.position.x, cursor_.y - output->second.logicalBounds.position.y},
+        .transitioning = false,
         .revision = revision_,
     };
+
+    if (const auto state = transitions_.find(outputName); state != transitions_.end() && state->second.active) {
+        plan.previousProfile = state->second.previousProfile;
+        plan.transition = state->second.transition;
+        plan.transitionProgress = std::clamp(
+            static_cast<double>(state->second.elapsed.count()) / static_cast<double>(state->second.transition.durationMs), 0.0, 1.0);
+        plan.transitioning = true;
+    }
 
     const auto& defaultWallpaper = config_.profiles.at(config_.defaultProfile).wallpaper;
     if (defaultWallpaper != profile.wallpaper)
@@ -175,6 +219,39 @@ std::uint64_t Engine::revision() const {
 
 void Engine::changed() {
     ++revision_;
+}
+
+void Engine::startTransition(const std::string& output, const std::optional<std::int64_t> oldWorkspace, const std::optional<std::int64_t> newWorkspace) {
+    const auto destination = resolveProfile(newWorkspace).second;
+    auto transition = destination.transition.value_or(config_.transition.value_or(Transition{}));
+    if (transition.type == TransitionType::Random) {
+        static std::mt19937 generator{0x4C555841U};
+        std::vector<TransitionType> choices = transition.randomAllowlist;
+        if (choices.empty())
+            transition.type = TransitionType::Fade;
+        else {
+            if (choices.size() > 1) {
+                if (const auto previous = lastRandomTransitions_.find(output); previous != lastRandomTransitions_.end()) {
+                    choices.erase(std::remove(choices.begin(), choices.end(), previous->second), choices.end());
+                }
+            }
+            std::uniform_int_distribution<std::size_t> distribution(0, choices.size() - 1);
+            transition.type = choices[distribution(generator)];
+            lastRandomTransitions_[output] = transition.type;
+        }
+    }
+    if (transition.type == TransitionType::None) {
+        transitions_.erase(output);
+        return;
+    }
+
+    const auto source = resolveProfile(oldWorkspace).second;
+    transitions_[output] = TransitionState{
+        .previousProfile = source,
+        .transition = transition,
+        .elapsed = {},
+        .active = true,
+    };
 }
 
 } // namespace luxaxis

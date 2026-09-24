@@ -1,6 +1,7 @@
 #include "hyprland_adapter.hpp"
 
 #include "luxaxis/spotlight.hpp"
+#include "luxaxis/transition.hpp"
 
 #include <src/Compositor.hpp>
 #include <src/SharedDefs.hpp>
@@ -101,7 +102,9 @@ Config fallbackConfig() {
     Config config;
     config.defaultProfile = "default";
     config.fallbackColor = parseFallbackColor();
-    config.profiles.emplace("default", Profile{.wallpaper = "/__luxaxis_missing_wallpaper__.png"});
+    Profile profile;
+    profile.wallpaper = "/__luxaxis_missing_wallpaper__.png";
+    config.profiles.emplace("default", std::move(profile));
     return config;
 }
 
@@ -184,6 +187,7 @@ struct Adapter::Impl {
     std::optional<Error> lastConfigError;
     std::unordered_map<std::string, TextureHandle> maskTextures;
     std::unordered_map<std::string, std::uint64_t> maskRevisions;
+    std::unordered_map<std::string, SP<Render::ITexture>> lastWallpaperTextures;
     CHyprSignalListener renderStage;
     CHyprSignalListener workspaceActive;
     CHyprSignalListener workspaceMove;
@@ -193,6 +197,7 @@ struct Adapter::Impl {
     CHyprSignalListener cursorMove;
     SP<SHyprCtlCommand> reloadCommand;
     SP<SHyprCtlCommand> spotlightCommand;
+    std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
 
     Impl(HANDLE pluginHandle, std::filesystem::path source, std::filesystem::path homePath, Config initial)
         : handle(pluginHandle), configPath(std::move(source)), home(std::move(homePath)), config(std::move(initial)), engine(config),
@@ -220,8 +225,10 @@ struct Adapter::Impl {
             damageManagedOutputs();
         });
         monitorRemoved = Event::bus()->m_events.monitor.removed.listen([this](PHLMONITOR monitor) {
-            if (monitor)
+            if (monitor) {
                 (void)engine.removeOutput(monitor->m_name);
+                lastWallpaperTextures.erase(monitor->m_name);
+            }
             damageManagedOutputs();
         });
         monitorFocused = Event::bus()->m_events.monitor.focused.listen([this](PHLMONITOR monitor) {
@@ -324,39 +331,120 @@ struct Adapter::Impl {
         return wrapTexture(std::move(texture));
     }
 
+    TextureHandle wallpaperTexture(const std::vector<std::filesystem::path>& candidates) {
+        for (const auto& candidate : candidates) {
+            if (auto current = cache.texture(candidate))
+                return current;
+            (void)cache.request(candidate);
+        }
+        return {};
+    }
+
+    void uploadPendingTextures() {
+        for (auto& request : cache.takeUploads()) {
+            const auto texture = g_pHyprRenderer->createTexture(
+                DRM_FORMAT_ABGR8888,
+                request.image.rgba.data(),
+                request.image.stride,
+                {static_cast<double>(request.image.width), static_cast<double>(request.image.height)},
+                false,
+                false);
+            if (!texture) {
+                (void)cache.failUpload(request, "Hyprland rejected the wallpaper texture upload");
+                continue;
+            }
+            const auto bytes = static_cast<std::size_t>(request.image.stride) * request.image.height;
+            (void)cache.completeUpload(request, wrapTexture(texture), bytes);
+        }
+    }
+
+    CRegion transitionClip(const RenderPlan& plan, const Vector2D outputSize) {
+        CRegion region;
+        constexpr int GRID = 48;
+        const auto progress = plan.transitionProgress;
+        for (int y = 0; y < GRID; ++y) {
+            for (int x = 0; x < GRID; ++x) {
+                const Vec2 point{
+                    (static_cast<double>(x) + 0.5) * outputSize.x / GRID,
+                    (static_cast<double>(y) + 0.5) * outputSize.y / GRID,
+                };
+                if (transitionReveal(plan.transition, progress, point, {outputSize.x, outputSize.y}, plan.transitionOrigin) < 0.5)
+                    continue;
+                region.add(CBox{
+                    point.x - outputSize.x / GRID * 0.5,
+                    point.y - outputSize.y / GRID * 0.5,
+                    outputSize.x / GRID + 1.0,
+                    outputSize.y / GRID + 1.0,
+                });
+            }
+        }
+        return region;
+    }
+
+    void drawWallpaperTexture(PHLMONITOR monitor, const SP<Render::ITexture>& texture, const Profile& profile, const float alpha = 1.F, const CRegion& clip = {}) {
+        if (!texture)
+            return;
+        const auto outputSize = monitor->m_transformedSize;
+        const auto imageSize = Vector2D{texture->m_size.x, texture->m_size.y};
+        const auto fit = profile.fit;
+        const double scaleX = outputSize.x / imageSize.x;
+        const double scaleY = outputSize.y / imageSize.y;
+        const double scale = fit == FitMode::Stretch ? 1.0 : (fit == FitMode::Contain ? std::min(scaleX, scaleY) : std::max(scaleX, scaleY));
+        const auto imageBox = fit == FitMode::Stretch ? outputSize : Vector2D{imageSize.x * scale, imageSize.y * scale};
+        const auto excess = outputSize - imageBox;
+        const auto origin = Vector2D{excess.x * profile.position.x, excess.y * profile.position.y};
+        CTexPassElement::SRenderData data{};
+        data.tex = texture;
+        data.box = {origin, imageBox};
+        data.a = alpha;
+        data.clipRegion = clip;
+        g_pHyprRenderer->addPassElement(makeUnique<CTexPassElement>(std::move(data)));
+    }
+
     void renderWallpaper() {
+        const auto now = std::chrono::steady_clock::now();
+        const auto frameDelta = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFrame);
+        lastFrame = now;
+        engine.advance(frameDelta);
         applyPendingConfig();
         auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
         if (!monitor)
             return;
+        uploadPendingTextures();
         syncOutput(monitor);
         const auto plan = engine.planFor(monitor->m_name);
         if (!plan)
             return;
 
-        TextureHandle wallpaper;
-        for (const auto& candidate : plan->wallpaperCandidates) {
-            if (auto current = cache.texture(candidate)) {
-                wallpaper = std::move(current);
-                break;
-            }
-            (void)cache.request(candidate);
-        }
+        std::set<std::filesystem::path> pinned{plan->profile.wallpaper};
+        if (plan->previousProfile)
+            pinned.insert(plan->previousProfile->wallpaper);
+        cache.setPinned(pinned);
+
+        // During a transition, only the destination image may replace the
+        // source. A default-profile fallback is allowed once the transition
+        // has finished, but must not make a missing destination flash early.
+        const auto wallpaper = plan->transitioning ? wallpaperTexture({plan->profile.wallpaper}) : wallpaperTexture(plan->wallpaperCandidates);
 
         const CBox outputBox{{0.0, 0.0}, monitor->m_transformedSize};
-        if (auto texture = unwrapTexture(wallpaper)) {
-            const auto imageSize = Vector2D{texture->m_size.x, texture->m_size.y};
-            const auto fit = plan->profile.fit;
-            double scaleX = monitor->m_transformedSize.x / imageSize.x;
-            double scaleY = monitor->m_transformedSize.y / imageSize.y;
-            double scale = fit == FitMode::Stretch ? 1.0 : (fit == FitMode::Contain ? std::min(scaleX, scaleY) : std::max(scaleX, scaleY));
-            const auto imageBox = Vector2D{imageSize.x * scale, imageSize.y * scale};
-            const auto excess = monitor->m_transformedSize - imageBox;
-            const auto origin = Vector2D{excess.x * plan->profile.position.x, excess.y * plan->profile.position.y};
-            CTexPassElement::SRenderData data{};
-            data.tex = std::move(texture);
-            data.box = {origin, imageBox};
-            g_pHyprRenderer->addPassElement(makeUnique<CTexPassElement>(std::move(data)));
+        const auto currentTexture = unwrapTexture(wallpaper);
+        if (plan->transitioning && plan->previousProfile) {
+            const auto oldTexture = unwrapTexture(wallpaperTexture({plan->previousProfile->wallpaper}));
+            if (oldTexture)
+                drawWallpaperTexture(monitor, oldTexture, *plan->previousProfile);
+            if (currentTexture) {
+                if (plan->transition.type == TransitionType::Fade)
+                    drawWallpaperTexture(monitor, currentTexture, plan->profile, static_cast<float>(plan->transitionProgress));
+                else
+                    drawWallpaperTexture(monitor, currentTexture, plan->profile, 1.F, transitionClip(*plan, monitor->m_transformedSize));
+            }
+            if (!currentTexture && oldTexture)
+                lastWallpaperTextures[monitor->m_name] = oldTexture;
+        } else if (currentTexture) {
+            lastWallpaperTextures[monitor->m_name] = currentTexture;
+            drawWallpaperTexture(monitor, currentTexture, plan->profile);
+        } else if (const auto previous = lastWallpaperTextures.find(monitor->m_name); previous != lastWallpaperTextures.end()) {
+            drawWallpaperTexture(monitor, previous->second, plan->profile);
         } else {
             CRectPassElement::SRectData data{};
             data.box = outputBox;
@@ -372,12 +460,15 @@ struct Adapter::Impl {
                 mask = createMaskTexture(monitor, *plan);
                 maskRevisions[monitor->m_name] = keyRevision;
             }
-            if (auto texture = unwrapTexture(mask))
+            if (auto texture = unwrapTexture(mask)) {
                 CTexPassElement::SRenderData data{};
                 data.tex = std::move(texture);
                 data.box = outputBox;
                 g_pHyprRenderer->addPassElement(makeUnique<CTexPassElement>(std::move(data)));
+            }
         }
+        if (plan->transitioning)
+            damageManagedOutputs();
     }
 };
 

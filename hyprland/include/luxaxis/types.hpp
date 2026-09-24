@@ -6,6 +6,8 @@
 #include <map>
 #include <set>
 #include <string>
+#include <optional>
+#include <vector>
 
 namespace luxaxis {
 
@@ -68,6 +70,33 @@ enum class StripOrientation : std::uint8_t {
     Vertical,
 };
 
+enum class TransitionType : std::uint8_t {
+    None,
+    Fade,
+    Wipe,
+    Grow,
+    Outer,
+    Clock,
+    Random,
+};
+
+enum class TransitionOrigin : std::uint8_t {
+    Cursor,
+    Center,
+    Point,
+};
+
+struct Transition {
+    TransitionType type = TransitionType::None;
+    std::uint32_t durationMs = 220;
+    std::string easing = "linear";
+    TransitionOrigin origin = TransitionOrigin::Cursor;
+    Vec2 point{0.5, 0.5};
+    std::vector<TransitionType> randomAllowlist;
+
+    friend bool operator==(const Transition&, const Transition&) = default;
+};
+
 struct Spotlight {
     SpotlightType type = SpotlightType::None;
     Color maskColor{};
@@ -88,6 +117,7 @@ struct Profile {
     FitMode fit = FitMode::Cover;
     Vec2 position{0.5, 0.5};
     Spotlight spotlight{};
+    std::optional<Transition> transition;
 
     friend bool operator==(const Profile&, const Profile&) = default;
 };
@@ -99,6 +129,7 @@ struct Config {
     std::set<std::string> excludedOutputs;
     std::size_t textureCacheBytes = 256ULL * 1024ULL * 1024ULL;
     Color fallbackColor{};
+    std::optional<Transition> transition;
     std::map<std::string, Profile> profiles;
     std::map<std::int64_t, std::string> workspaces;
 

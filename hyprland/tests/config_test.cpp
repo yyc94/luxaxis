@@ -101,6 +101,11 @@ void strictValidationRejectsInvalidCandidates() {
     badExtension.replace(badExtension.find("base.webp"), 9, "base.gif");
     parsed = luxaxis::parseConfig(badExtension, "/config/luxaxis.toml", "/home/tester");
     require(!parsed && parsed.error().message.contains("PNG, JPEG, or WebP"), "unsupported image was accepted");
+
+    auto unknownTransitionField = std::string{VALID_CONFIG};
+    unknownTransitionField.insert(unknownTransitionField.find("[profiles.default]"), "[transition]\ntype = \"fade\"\npoint = [0.2, 0.3]\n\n");
+    parsed = luxaxis::parseConfig(unknownTransitionField, "/config/luxaxis.toml", "/home/tester");
+    require(!parsed && parsed.error().message.contains("unknown field 'point'"), "unknown transition field was accepted");
 }
 
 void invalidReplacementPreservesActiveConfig() {
@@ -112,6 +117,17 @@ void invalidReplacementPreservesActiveConfig() {
     require(!active.tryReplace("version = 1", "/config/luxaxis.toml", "/home/tester"), "invalid candidate became active");
     require(active.current() == original, "invalid candidate replaced active config");
     require(active.lastError().has_value(), "invalid candidate did not retain an error");
+}
+
+void phaseTwoBTransitionConfigParsesStrictly() {
+    auto text = std::string{VALID_CONFIG};
+    text.insert(text.find("[profiles.default]"), "[transition]\ntype = \"fade\"\nduration_ms = 180\neasing = \"ease-out\"\norigin = \"center\"\n\n");
+    text.insert(text.find("[profiles.focus]"), "[profiles.default.transition]\ntype = \"random\"\nallowlist = [\"wipe\", \"grow\"]\n\n");
+    const auto parsed = luxaxis::parseConfig(text, "/config/luxaxis.toml", "/home/tester");
+    require(parsed.hasValue(), "transition configuration was rejected");
+    require(parsed.value().transition && parsed.value().transition->durationMs == 180, "global transition did not parse");
+    require(parsed.value().profiles.at("default").transition && parsed.value().profiles.at("default").transition->randomAllowlist.size() == 2,
+            "random transition allowlist did not parse");
 }
 
 void configPathFollowsXdgRules() {
@@ -131,6 +147,7 @@ int main() {
         strictValidationRejectsInvalidCandidates();
         invalidReplacementPreservesActiveConfig();
         configPathFollowsXdgRules();
+        phaseTwoBTransitionConfigParsesStrictly();
     } catch (const std::exception& error) {
         std::cerr << "config_test: " << error.what() << '\n';
         return EXIT_FAILURE;

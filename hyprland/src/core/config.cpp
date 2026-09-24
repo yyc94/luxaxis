@@ -210,8 +210,71 @@ Spotlight spotlight(const toml::table& table, const std::string& context) {
     fail(context + ".type", "expected 'none', 'circle', 'strip', or 'fan'");
 }
 
+TransitionType transitionType(const std::string& value, const std::string& context) {
+    if (value == "none") return TransitionType::None;
+    if (value == "fade") return TransitionType::Fade;
+    if (value == "wipe") return TransitionType::Wipe;
+    if (value == "grow") return TransitionType::Grow;
+    if (value == "outer") return TransitionType::Outer;
+    if (value == "clock") return TransitionType::Clock;
+    if (value == "random") return TransitionType::Random;
+    fail(context, "expected none, fade, wipe, grow, outer, clock, or random");
+}
+
+Transition transition(const toml::table& table, const std::string& context) {
+    ensureOnly(table, {"type", "duration_ms", "easing", "origin", "allowlist"}, context);
+    Transition result;
+    result.type = transitionType(requireString(table, "type", context), context + ".type");
+
+    if (const auto duration = table["duration_ms"].value<std::int64_t>()) {
+        if (*duration < 50 || *duration > 2000)
+            fail(context + ".duration_ms", "expected an integer in [50, 2000]");
+        result.durationMs = static_cast<std::uint32_t>(*duration);
+    } else if (table.contains("duration_ms")) {
+        fail(context + ".duration_ms", "expected an integer");
+    }
+
+    if (const auto easing = table["easing"].value<std::string>()) {
+        if (*easing != "linear" && *easing != "ease-in" && *easing != "ease-out" && *easing != "ease-in-out")
+            fail(context + ".easing", "expected linear, ease-in, ease-out, or ease-in-out");
+        result.easing = *easing;
+    } else if (table.contains("easing")) {
+        fail(context + ".easing", "expected a string");
+    }
+
+    if (const auto* origin = table.get("origin")) {
+        if (const auto value = origin->value<std::string>()) {
+            if (*value == "cursor") result.origin = TransitionOrigin::Cursor;
+            else if (*value == "center") result.origin = TransitionOrigin::Center;
+            else fail(context + ".origin", "expected cursor, center, or a normalized point");
+        } else {
+            result.origin = TransitionOrigin::Point;
+            result.point = vec2(*origin, context + ".origin");
+        }
+    }
+    if (result.type == TransitionType::Random) {
+        const auto* allowlist = table.get("allowlist");
+        if (!allowlist || !allowlist->is_array())
+            fail(context + ".allowlist", "random transitions require an array");
+        for (std::size_t index = 0; index < allowlist->as_array()->size(); ++index) {
+            const auto value = allowlist->as_array()->get(index)->value<std::string>();
+            if (!value)
+                fail(context + ".allowlist[" + std::to_string(index) + "]", "expected a transition name");
+            const auto type = transitionType(*value, context + ".allowlist[" + std::to_string(index) + "]");
+            if (type == TransitionType::None || type == TransitionType::Random)
+                fail(context + ".allowlist", "allowlist entries cannot be none or random");
+            result.randomAllowlist.push_back(type);
+        }
+        if (result.randomAllowlist.empty())
+            fail(context + ".allowlist", "allowlist cannot be empty");
+    } else if (table.contains("allowlist")) {
+        fail(context + ".allowlist", "allowlist is only valid for random transitions");
+    }
+    return result;
+}
+
 Profile profile(const toml::table& table, const std::filesystem::path& home, const std::string& context) {
-    ensureOnly(table, {"wallpaper", "fit", "position", "spotlight"}, context);
+    ensureOnly(table, {"wallpaper", "fit", "position", "spotlight", "transition"}, context);
     Profile result;
     result.wallpaper = wallpaperPath(requireString(table, "wallpaper", context), home, context + ".wallpaper");
 
@@ -224,21 +287,24 @@ Profile profile(const toml::table& table, const std::filesystem::path& home, con
         result.position = vec2(*position, context + ".position");
     if (const auto* spotlightNode = table.get("spotlight"))
         result.spotlight = spotlight(requireTable(*spotlightNode, context + ".spotlight"), context + ".spotlight");
+    if (const auto* transitionNode = table.get("transition"))
+        result.transition = transition(requireTable(*transitionNode, context + ".transition"), context + ".transition");
     return result;
 }
 
 Config validate(const toml::table& root, const std::filesystem::path& home) {
     ensureOnly(
         root,
-        {"version", "default_profile", "active_output", "excluded_outputs", "texture_cache_mib", "fallback_color", "profiles", "workspaces"},
+        {"version", "default_profile", "active_output", "excluded_outputs", "texture_cache_mib", "fallback_color", "transition", "profiles", "workspaces"},
         "root");
 
     Config result;
-    const auto version = requireNode(root, "version", "root").value<std::int64_t>();
+    const std::string rootContext = "root";
+    const auto version = requireNode(root, "version", rootContext).value<std::int64_t>();
     if (!version || *version != 1)
         fail("root.version", "only version 1 is supported");
     result.version = 1;
-    result.defaultProfile = requireString(root, "default_profile", "root");
+    result.defaultProfile = requireString(root, "default_profile", rootContext);
     if (result.defaultProfile.empty())
         fail("root.default_profile", "profile name cannot be empty");
 
@@ -279,8 +345,12 @@ Config validate(const toml::table& root, const std::filesystem::path& home) {
     else if (root.contains("fallback_color"))
         fail("root.fallback_color", "expected a string");
 
-    const auto& profilesNode = requireNode(root, "profiles", "root");
-    const auto& profiles = requireTable(profilesNode, "root.profiles");
+    if (const auto* transitionNode = root.get("transition"))
+        result.transition = transition(requireTable(*transitionNode, "root.transition"), "root.transition");
+
+    const std::string profilesContext = "root.profiles";
+    const auto& profilesNode = requireNode(root, "profiles", rootContext);
+    const auto& profiles = requireTable(profilesNode, profilesContext);
     if (profiles.empty())
         fail("root.profiles", "at least one profile is required");
     for (const auto& [name, node] : profiles) {
@@ -292,8 +362,9 @@ Config validate(const toml::table& root, const std::filesystem::path& home) {
     if (!result.profiles.contains(result.defaultProfile))
         fail("root.default_profile", "references missing profile '" + result.defaultProfile + "'");
 
-    const auto& workspacesNode = requireNode(root, "workspaces", "root");
-    const auto& workspaces = requireTable(workspacesNode, "root.workspaces");
+    const std::string workspacesContext = "root.workspaces";
+    const auto& workspacesNode = requireNode(root, "workspaces", rootContext);
+    const auto& workspaces = requireTable(workspacesNode, workspacesContext);
     for (const auto& [workspace, node] : workspaces) {
         std::int64_t id = 0;
         const auto raw = workspace.str();
