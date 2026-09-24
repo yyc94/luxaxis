@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -125,6 +126,21 @@ void invalidDecodeBufferIsRejected() {
     require(state.error.contains("stride"), "invalid buffer diagnostic was not concrete");
 }
 
+void oversizedDecodeBufferIsRejectedBeforeAccounting() {
+    luxaxis::ImageCache cache{64, [](const auto&) -> luxaxis::Result<luxaxis::DecodedImage> {
+                                   return luxaxis::DecodedImage{
+                                       .width = std::numeric_limits<std::uint32_t>::max(),
+                                       .height = std::numeric_limits<std::uint32_t>::max(),
+                                       .stride = std::numeric_limits<std::uint32_t>::max(),
+                                       .rgba = {},
+                                   };
+                               }};
+    require(cache.request("/wall/huge.png"), "oversized image was not queued");
+    cache.waitForIdle();
+    const auto state = cache.snapshot("/wall/huge.png");
+    require(state.status == luxaxis::ImageStatus::Failed, "oversized decoded buffer was accepted");
+}
+
 void decoderExceptionsBecomeFailures() {
     luxaxis::ImageCache cache{64, [](const auto&) -> luxaxis::Result<luxaxis::DecodedImage> { throw std::runtime_error("broken decoder"); }};
     require(cache.request("/wall/throw.png"), "throwing image was not queued");
@@ -169,6 +185,7 @@ int main() {
         pinnedTexturesMayTemporarilyExceedBudget();
         failedRefreshRetainsLastValidTexture();
         invalidDecodeBufferIsRejected();
+        oversizedDecodeBufferIsRejectedBeforeAccounting();
         decoderExceptionsBecomeFailures();
         uploadsCanBeBudgetedAcrossFrames();
         inactiveFailureMetadataIsPruned();
