@@ -24,6 +24,7 @@
 #include <wayland-server-core.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -32,6 +33,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <fcntl.h>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -72,10 +74,17 @@ Result<DecodedImage> decodeImage(const std::filesystem::path& path) {
         return Error{path.string(), "decoder returned no Cairo surface"};
 
     const auto size = surface->size();
+    if (!std::isfinite(size.x) || !std::isfinite(size.y) || size.x <= 0.0 || size.y <= 0.0 ||
+        size.x > static_cast<double>(std::numeric_limits<std::uint32_t>::max()) ||
+        size.y > static_cast<double>(std::numeric_limits<std::uint32_t>::max()) || !surface->data())
+        return Error{path.string(), "decoder returned invalid image dimensions or data"};
     const auto width = static_cast<std::uint32_t>(size.x);
     const auto height = static_cast<std::uint32_t>(size.y);
     const auto sourceStride = surface->stride();
-    if (width == 0 || height == 0 || sourceStride < static_cast<int>(width * 4U))
+    const auto minimumStride = static_cast<std::uint64_t>(width) * 4ULL;
+    const auto pixelBytes = static_cast<std::uint64_t>(width) * height * 4ULL;
+    if (width == 0 || height == 0 || sourceStride <= 0 || static_cast<std::uint64_t>(sourceStride) < minimumStride ||
+        pixelBytes > std::numeric_limits<std::size_t>::max())
         return Error{path.string(), "decoder returned an invalid Cairo surface"};
 
     DecodedImage result{
@@ -328,10 +337,11 @@ class WallpaperWatcher {
                 if (entry == observed.end()) {
                     observed.emplace(path, currentTime);
                 } else if (entry->second != currentTime) {
-                    (void)cache_.refresh(path);
-                    entry->second = currentTime;
-                    if (wake_)
-                        wake_();
+                    if (cache_.refresh(path)) {
+                        entry->second = currentTime;
+                        if (wake_)
+                            wake_();
+                    }
                 }
             }
             std::this_thread::sleep_for(300ms);
@@ -361,7 +371,13 @@ struct Adapter::Impl {
     std::mutex errorMutex;
     std::optional<Error> lastConfigError;
     std::unordered_map<std::string, TextureHandle> maskTextures;
-    std::unordered_map<std::string, std::uint64_t> maskRevisions;
+    struct MaskState {
+        Spotlight spotlight;
+        Vec2 outputSize;
+        Vec2 cursor;
+        bool revealEnabled = false;
+    };
+    std::unordered_map<std::string, MaskState> maskStates;
     std::unordered_map<std::string, Vec2> fanDirections;
     struct LastWallpaper {
         std::filesystem::path path;
@@ -419,6 +435,9 @@ struct Adapter::Impl {
                 (void)engine.removeOutput(monitor->m_name);
                 lastWallpaperTextures.erase(monitor->m_name);
                 fanDirections.erase(monitor->m_name);
+                const auto prefix = monitor->m_name + ":";
+                std::erase_if(maskTextures, [&prefix](const auto& item) { return item.first.starts_with(prefix); });
+                std::erase_if(maskStates, [&prefix](const auto& item) { return item.first.starts_with(prefix); });
             }
             damageManagedOutputs();
         });
@@ -432,10 +451,11 @@ struct Adapter::Impl {
         });
         cursorMove = Event::bus()->m_events.input.mouse.move.listen([this](Vector2D position, Event::SCallbackInfo&) {
             const auto previous = engine.activeOutput();
-            (void)engine.setCursor({position.x, position.y});
+            if (!engine.setCursor({position.x, position.y}))
+                return;
             if (previous)
                 damageOutput(*previous);
-            if (const auto current = engine.activeOutput())
+            if (const auto current = engine.activeOutput(); current && current != previous)
                 damageOutput(*current);
         });
     }
@@ -499,7 +519,9 @@ struct Adapter::Impl {
             cache.setBudget(config.textureCacheBytes);
             wallpaperWatcher.setPaths(config);
             maskTextures.clear();
-            maskRevisions.clear();
+            maskStates.clear();
+            const auto paths = wallpaperPaths(config);
+            std::erase_if(reportedImageErrors, [&paths](const auto& path) { return !paths.contains(path); });
             damageManagedOutputs();
         }
         if (error) {
@@ -517,6 +539,15 @@ struct Adapter::Impl {
         // mask is uploaded at the transformed pixel size and stretched by the
         // render pass, so geometry remains scale-independent.
         const auto outputSize = Vec2{monitor->m_size.x, monitor->m_size.y};
+        if (!revealEnabled) {
+            std::array pixels{
+                static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.r, 0.0, 1.0) * 255.0),
+                static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.g, 0.0, 1.0) * 255.0),
+                static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.b, 0.0, 1.0) * 255.0),
+                static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskOpacity, 0.0, 1.0) * 255.0),
+            };
+            return wrapTexture(g_pHyprRenderer->createTexture(DRM_FORMAT_ABGR8888, pixels.data(), 4U, {1.0, 1.0}, false, false));
+        }
         const auto anchor = Vec2{profile.spotlight.anchor.x * outputSize.x, profile.spotlight.anchor.y * outputSize.y};
         const auto previousDirection = fanDirections.contains(monitor->m_name) ? fanDirections.at(monitor->m_name) : Vec2{0.0, 1.0};
         const auto direction = resolveFanDirection(anchor, plan.cursorLocal, previousDirection);
@@ -553,12 +584,16 @@ struct Adapter::Impl {
         if (profile.spotlight.type == SpotlightType::None)
             return {};
         const auto cacheKey = monitor->m_name + ":" + key;
-        const auto keyRevision = plan.revision ^ static_cast<std::uint64_t>(std::llround(plan.cursorLocal.x * 16.0)) ^
-            (static_cast<std::uint64_t>(std::llround(plan.cursorLocal.y * 16.0)) << 32U);
+        const auto outputSize = Vec2{monitor->m_size.x, monitor->m_size.y};
+        const auto cursor = revealEnabled ? plan.cursorLocal : Vec2{};
+        const MaskState expected{profile.spotlight, outputSize, cursor, revealEnabled};
         auto& mask = maskTextures[cacheKey];
-        if (!mask || maskRevisions[cacheKey] != keyRevision)
+        const auto state = maskStates.find(cacheKey);
+        if (!mask || state == maskStates.end() || state->second.spotlight != expected.spotlight || state->second.outputSize != expected.outputSize ||
+            state->second.cursor != expected.cursor || state->second.revealEnabled != expected.revealEnabled) {
             mask = createMaskTexture(monitor, plan, profile, revealEnabled);
-        maskRevisions[cacheKey] = keyRevision;
+            maskStates.insert_or_assign(cacheKey, expected);
+        }
         return mask;
     }
 
@@ -582,7 +617,7 @@ struct Adapter::Impl {
     }
 
     void uploadPendingTextures() {
-        for (auto& request : cache.takeUploads()) {
+        for (auto& request : cache.takeUploads(1)) {
             const auto texture = g_pHyprRenderer->createTexture(
                 DRM_FORMAT_ABGR8888,
                 request.image.rgba.data(),
@@ -597,10 +632,41 @@ struct Adapter::Impl {
             const auto bytes = static_cast<std::size_t>(request.image.stride) * request.image.height;
             (void)cache.completeUpload(request, wrapTexture(texture), bytes);
         }
+        if (cache.hasPendingUploads())
+            damageManagedOutputs();
     }
 
     CRegion transitionClip(const Transition& transition, const double progress, const Vec2 origin, const Vector2D logicalSize, const float scale) {
         CRegion region;
+        const auto eased = easeProgress(progress, transition.easing);
+        const auto addLogicalBox = [&region, scale](const double x, const double y, const double width, const double height) {
+            if (width > 0.0 && height > 0.0)
+                region.add(CBox{x * scale, y * scale, width * scale, height * scale});
+        };
+        if (eased <= 0.0)
+            return region;
+        if (eased >= 1.0) {
+            addLogicalBox(0.0, 0.0, logicalSize.x, logicalSize.y);
+            return region;
+        }
+        if (transition.type == TransitionType::Wipe) {
+            const auto fromRight = origin.x > logicalSize.x * 0.5;
+            const auto edge = fromRight ? logicalSize.x * (1.0 - eased) : logicalSize.x * eased;
+            addLogicalBox(fromRight ? edge : 0.0, 0.0, fromRight ? logicalSize.x - edge : edge, logicalSize.y);
+            return region;
+        }
+        if (transition.type == TransitionType::Outer) {
+            const auto left = origin.x * eased;
+            const auto right = origin.x + (logicalSize.x - origin.x) * (1.0 - eased);
+            const auto top = origin.y * eased;
+            const auto bottom = origin.y + (logicalSize.y - origin.y) * (1.0 - eased);
+            addLogicalBox(0.0, 0.0, logicalSize.x, top);
+            addLogicalBox(0.0, bottom, logicalSize.x, logicalSize.y - bottom);
+            addLogicalBox(0.0, top, left, bottom - top);
+            addLogicalBox(right, top, logicalSize.x - right, bottom - top);
+            return region;
+        }
+
         constexpr int GRID = 48;
         for (int y = 0; y < GRID; ++y) {
             for (int x = 0; x < GRID; ++x) {
@@ -657,10 +723,11 @@ struct Adapter::Impl {
             return;
 
         std::set<std::filesystem::path> pinned;
-        for (const auto& other : engine.plans())
+        const auto plans = engine.plans();
+        for (const auto& other : plans)
             for (const auto& candidate : other.wallpaperCandidates)
                 pinned.insert(candidate);
-        for (const auto& other : engine.plans()) {
+        for (const auto& other : plans) {
             if (other.previousProfile)
                 pinned.insert(other.previousProfile->wallpaper);
         }

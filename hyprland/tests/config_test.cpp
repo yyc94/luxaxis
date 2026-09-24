@@ -128,11 +128,15 @@ void phaseTwoBTransitionConfigParsesStrictly() {
     auto text = std::string{VALID_CONFIG};
     text.insert(text.find("[profiles.default]"), "[transition]\ntype = \"fade\"\nduration_ms = 180\neasing = \"ease-out\"\norigin = \"center\"\n\n");
     text.insert(text.find("[profiles.focus]"), "[profiles.default.transition]\ntype = \"random\"\nallowlist = [\"wipe\", \"grow\"]\n\n");
-    const auto parsed = luxaxis::parseConfig(text, "/config/luxaxis.toml", "/home/tester");
+    auto parsed = luxaxis::parseConfig(text, "/config/luxaxis.toml", "/home/tester");
     require(parsed.hasValue(), "transition configuration was rejected");
     require(parsed.value().transition && parsed.value().transition->durationMs == 180, "global transition did not parse");
     require(parsed.value().profiles.at("default").transition && parsed.value().profiles.at("default").transition->randomAllowlist.size() == 2,
             "random transition allowlist did not parse");
+
+    text.insert(text.find("[profiles.beam]"), "[profiles.beam.transition]\ntype = \"random\"\nallowlist = [\"wipe\", \"wipe\"]\n\n");
+    parsed = luxaxis::parseConfig(text, "/config/luxaxis.toml", "/home/tester");
+    require(!parsed && parsed.error().message.contains("unique"), "duplicate random transition was accepted");
 }
 
 void configPathFollowsXdgRules() {

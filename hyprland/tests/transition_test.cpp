@@ -38,6 +38,14 @@ void easingIsBounded() {
     require(luxaxis::easeProgress(-1.0, "linear") == 0.0 && luxaxis::easeProgress(2.0, "linear") == 1.0, "easing was not bounded");
 }
 
+void growUsesTheFarthestCornerFromItsOrigin() {
+    const auto spec = transition(luxaxis::TransitionType::Grow);
+    require(luxaxis::transitionReveal(spec, 0.5, {90.0, 50.0}, {100.0, 100.0}, {50.0, 50.0}) == 0.0,
+            "grow completed too early by using the full output diagonal");
+    require(luxaxis::transitionReveal(spec, 0.8, {90.0, 50.0}, {100.0, 100.0}, {50.0, 50.0}) == 1.0,
+            "grow did not scale to its farthest corner");
+}
+
 void engineInterruptsInsteadOfQueueing() {
     luxaxis::Config config;
     config.defaultProfile = "default";
@@ -91,6 +99,7 @@ int main() {
     try {
         allTransitionTypesReachDestination();
         easingIsBounded();
+        growUsesTheFarthestCornerFromItsOrigin();
         engineInterruptsInsteadOfQueueing();
         randomTransitionsAvoidImmediateRepeats();
     } catch (const std::exception& error) {

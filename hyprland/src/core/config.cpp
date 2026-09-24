@@ -263,6 +263,8 @@ Transition transition(const toml::table& table, const std::string& context) {
             const auto type = transitionType(*value, context + ".allowlist[" + std::to_string(index) + "]");
             if (type == TransitionType::None || type == TransitionType::Random)
                 fail(context + ".allowlist", "allowlist entries cannot be none or random");
+            if (std::find(result.randomAllowlist.begin(), result.randomAllowlist.end(), type) != result.randomAllowlist.end())
+                fail(context + ".allowlist", "allowlist entries must be unique");
             result.randomAllowlist.push_back(type);
         }
         if (result.randomAllowlist.empty())

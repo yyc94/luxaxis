@@ -31,6 +31,7 @@ ImageCache::~ImageCache() {
     {
         std::lock_guard lock{mutex_};
         stopping_ = true;
+        jobs_.clear();
     }
     wake_.notify_all();
     if (worker_.joinable())
@@ -120,10 +121,12 @@ void ImageCache::workerLoop() {
     }
 }
 
-std::vector<UploadRequest> ImageCache::takeUploads() {
+std::vector<UploadRequest> ImageCache::takeUploads(const std::size_t maxCount) {
     std::lock_guard lock{mutex_};
     std::vector<UploadRequest> result;
     for (auto& [path, entry] : entries_) {
+        if (result.size() >= maxCount)
+            break;
         if (entry.status != ImageStatus::AwaitingUpload || !entry.decoded)
             continue;
         result.push_back({path, entry.generation, std::move(*entry.decoded)});
@@ -131,6 +134,11 @@ std::vector<UploadRequest> ImageCache::takeUploads() {
         entry.status = ImageStatus::Loading;
     }
     return result;
+}
+
+bool ImageCache::hasPendingUploads() const {
+    std::lock_guard lock{mutex_};
+    return std::ranges::any_of(entries_, [](const auto& item) { return item.second.status == ImageStatus::AwaitingUpload; });
 }
 
 bool ImageCache::completeUpload(const UploadRequest& request, TextureHandle texture, const std::size_t textureBytes) {
@@ -151,6 +159,7 @@ bool ImageCache::completeUpload(const UploadRequest& request, TextureHandle text
     entry.error.clear();
     entry.lastUsed = ++clock_;
     evictLocked();
+    pruneMetadataLocked();
     return true;
 }
 
@@ -196,12 +205,14 @@ void ImageCache::setPinned(const std::set<std::filesystem::path>& paths) {
     for (auto& [path, entry] : entries_)
         entry.pinned = paths.contains(path);
     evictLocked();
+    pruneMetadataLocked();
 }
 
 void ImageCache::setBudget(const std::size_t budgetBytes) {
     std::lock_guard lock{mutex_};
     budgetBytes_ = budgetBytes;
     evictLocked();
+    pruneMetadataLocked();
 }
 
 void ImageCache::evictLocked() {
@@ -220,6 +231,18 @@ void ImageCache::evictLocked() {
         victim->second.texture.reset();
         victim->second.textureBytes = 0;
         victim->second.status = ImageStatus::Missing;
+    }
+}
+
+void ImageCache::pruneMetadataLocked() {
+    for (auto iterator = entries_.begin(); iterator != entries_.end();) {
+        const auto& entry = iterator->second;
+        const bool active = entry.pinned || pinnedPaths_.contains(iterator->first) || entry.texture || entry.decoded ||
+            entry.status == ImageStatus::Loading || entry.status == ImageStatus::AwaitingUpload;
+        if (active)
+            ++iterator;
+        else
+            iterator = entries_.erase(iterator);
     }
 }
 

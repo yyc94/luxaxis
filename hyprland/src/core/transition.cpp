@@ -32,7 +32,12 @@ double transitionReveal(const Transition& transition, const double progress, con
     if (p <= 0.0)
         return 0.0;
 
-    const auto maxRadius = std::hypot(outputSize.x, outputSize.y);
+    const auto maxRadius = std::max({
+        distance(origin, {0.0, 0.0}),
+        distance(origin, {outputSize.x, 0.0}),
+        distance(origin, {0.0, outputSize.y}),
+        distance(origin, outputSize),
+    });
     switch (transition.type) {
         case TransitionType::Fade:
             return p;

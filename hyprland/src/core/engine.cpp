@@ -55,6 +55,8 @@ bool Engine::upsertOutput(OutputState output) {
         output.workspace.reset();
 
     const auto existing = outputs_.find(output.name);
+    if (existing != outputs_.end() && !output.workspace)
+        output.workspace = existing->second.workspace;
     if (existing != outputs_.end() && existing->second == output)
         return false;
     const auto oldWorkspace = existing == outputs_.end() ? std::optional<std::int64_t>{} : existing->second.workspace;
@@ -314,9 +316,13 @@ void Engine::startTransition(const std::string& output, const std::optional<std:
                     choices.erase(std::remove(choices.begin(), choices.end(), previous->second), choices.end());
                 }
             }
-            std::uniform_int_distribution<std::size_t> distribution(0, choices.size() - 1);
-            transition.type = choices[distribution(generator)];
-            lastRandomTransitions_[output] = transition.type;
+            if (choices.empty()) {
+                transition.type = TransitionType::Fade;
+            } else {
+                std::uniform_int_distribution<std::size_t> distribution(0, choices.size() - 1);
+                transition.type = choices[distribution(generator)];
+                lastRandomTransitions_[output] = transition.type;
+            }
         }
     }
     if (transition.type == TransitionType::None) {

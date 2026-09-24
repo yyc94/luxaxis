@@ -133,6 +133,32 @@ void decoderExceptionsBecomeFailures() {
     require(state.error.contains("broken decoder"), "decoder exception lost its diagnostic");
 }
 
+void uploadsCanBeBudgetedAcrossFrames() {
+    FakeDecoder decoder;
+    luxaxis::ImageCache cache{64, [&decoder](const auto& path) { return decoder(path); }};
+    require(cache.request("/wall/a.png"), "first image was not queued");
+    require(cache.request("/wall/b.png"), "second image was not queued");
+    cache.waitForIdle();
+
+    auto first = cache.takeUploads(1);
+    require(first.size() == 1, "upload budget was ignored");
+    require(cache.hasPendingUploads(), "remaining upload was not reported");
+    auto second = cache.takeUploads(1);
+    require(second.size() == 1, "remaining upload was lost");
+    require(!cache.hasPendingUploads(), "empty upload queue was reported as pending");
+}
+
+void inactiveFailureMetadataIsPruned() {
+    FakeDecoder decoder;
+    decoder.failures["/wall/removed.png"] = true;
+    luxaxis::ImageCache cache{64, [&decoder](const auto& path) { return decoder(path); }};
+    require(cache.request("/wall/removed.png"), "failed image was not queued");
+    cache.waitForIdle();
+    require(cache.snapshot("/wall/removed.png").status == luxaxis::ImageStatus::Failed, "failed image did not retain its diagnostic state");
+    cache.setPinned({});
+    require(cache.snapshot("/wall/removed.png").status == luxaxis::ImageStatus::Missing, "inactive failure metadata was not pruned");
+}
+
 } // namespace
 
 int main() {
@@ -143,6 +169,8 @@ int main() {
         failedRefreshRetainsLastValidTexture();
         invalidDecodeBufferIsRejected();
         decoderExceptionsBecomeFailures();
+        uploadsCanBeBudgetedAcrossFrames();
+        inactiveFailureMetadataIsPruned();
     } catch (const std::exception& error) {
         std::cerr << "image_cache_test: " << error.what() << '\n';
         return EXIT_FAILURE;

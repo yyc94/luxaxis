@@ -63,7 +63,8 @@ class ImageCache {
 
     [[nodiscard]] bool request(const std::filesystem::path& path);
     [[nodiscard]] bool refresh(const std::filesystem::path& path);
-    [[nodiscard]] std::vector<UploadRequest> takeUploads();
+    [[nodiscard]] std::vector<UploadRequest> takeUploads(std::size_t maxCount = static_cast<std::size_t>(-1));
+    [[nodiscard]] bool hasPendingUploads() const;
     [[nodiscard]] bool completeUpload(const UploadRequest& request, TextureHandle texture, std::size_t textureBytes);
     [[nodiscard]] bool failUpload(const UploadRequest& request, std::string message);
 
@@ -96,6 +97,7 @@ class ImageCache {
     [[nodiscard]] bool enqueue(const std::filesystem::path& path, bool force);
     void workerLoop();
     void evictLocked();
+    void pruneMetadataLocked();
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;

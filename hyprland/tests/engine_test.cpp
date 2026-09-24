@@ -109,6 +109,13 @@ void configReplacementReplansExistingOutputs() {
     require(engine.planFor("left")->profileName == "default", "configuration replacement did not replan existing output");
 }
 
+void ignoredWorkspaceKeepsNormalProfile() {
+    auto engine = twoOutputs();
+    require(!engine.upsertOutput({"left", {{0.0, 0.0}, {1920.0, 1080.0}}, std::nullopt}), "ignored workspace caused an unnecessary output update");
+    require(engine.planFor("left")->workspace == 2, "ignored workspace cleared the normal workspace");
+    require(engine.planFor("left")->profileName == "focus", "ignored workspace changed the active profile");
+}
+
 } // namespace
 
 int main() {
@@ -119,6 +126,7 @@ int main() {
         invalidWorkspaceEventsDoNotChangeNormalState();
         exclusionsAndSessionOverrideAreApplied();
         configReplacementReplansExistingOutputs();
+        ignoredWorkspaceKeepsNormalProfile();
     } catch (const std::exception& error) {
         std::cerr << "engine_test: " << error.what() << '\n';
         return EXIT_FAILURE;
