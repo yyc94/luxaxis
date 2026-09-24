@@ -770,6 +770,31 @@ struct Adapter::Impl {
         g_pHyprRenderer->addPassElement(makeUnique<CTexPassElement>(std::move(data)));
     }
 
+    void drawInterruptedWallpaperPrefix(PHLMONITOR monitor, const RenderPlan& plan, const SP<Render::ITexture>& oldTexture) {
+        if (!plan.interruptedSourceProfile || !plan.previousProfile)
+            return;
+        const auto sourceTexture = unwrapTexture(wallpaperTexture({plan.interruptedSourceProfile->wallpaper}));
+        if (sourceTexture)
+            drawWallpaperTexture(monitor, sourceTexture, *plan.interruptedSourceProfile);
+        if (!oldTexture)
+            return;
+        if (plan.interruptedTransition.type == TransitionType::Fade) {
+            drawWallpaperTexture(monitor, oldTexture, *plan.previousProfile, static_cast<float>(plan.interruptedProgress));
+        } else {
+            drawWallpaperTexture(
+                monitor,
+                oldTexture,
+                *plan.previousProfile,
+                1.F,
+                transitionClip(
+                    plan.interruptedTransition,
+                    plan.interruptedProgress,
+                    plan.interruptedOrigin,
+                    plan.logicalBounds.size,
+                    monitor->m_scale));
+        }
+    }
+
     void renderWallpaper() {
         const auto now = std::chrono::steady_clock::now();
         const auto frameDelta = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFrame);
@@ -847,54 +872,16 @@ struct Adapter::Impl {
             const auto oldTexture = unwrapTexture(wallpaperTexture({plan->previousProfile->wallpaper}));
             const auto sameWallpaper = plan->previousProfile->wallpaper == plan->profile.wallpaper;
             if (sameWallpaper) {
-                if (plan->interruptedSourceProfile) {
-                    const auto sourceTexture = unwrapTexture(wallpaperTexture({plan->interruptedSourceProfile->wallpaper}));
-                    if (sourceTexture)
-                        drawWallpaperTexture(monitor, sourceTexture, *plan->interruptedSourceProfile);
-                    if (oldTexture) {
-                        if (plan->interruptedTransition.type == TransitionType::Fade)
-                            drawWallpaperTexture(
-                                monitor, oldTexture, *plan->previousProfile, static_cast<float>(plan->interruptedProgress));
-                        else
-                            drawWallpaperTexture(
-                                monitor,
-                                oldTexture,
-                                *plan->previousProfile,
-                                1.F,
-                                transitionClip(
-                                    plan->interruptedTransition,
-                                    plan->interruptedProgress,
-                                    plan->interruptedOrigin,
-                                    plan->logicalBounds.size,
-                                    monitor->m_scale));
-                    }
-                } else if (currentTexture) {
+                if (plan->interruptedSourceProfile)
+                    drawInterruptedWallpaperPrefix(monitor, *plan, oldTexture);
+                else if (currentTexture) {
                     drawWallpaperTexture(monitor, currentTexture, plan->profile);
                 } else if (oldTexture) {
                     drawWallpaperTexture(monitor, oldTexture, *plan->previousProfile);
                 }
             } else {
                 if (plan->interruptedSourceProfile) {
-                    const auto sourceTexture = unwrapTexture(wallpaperTexture({plan->interruptedSourceProfile->wallpaper}));
-                    if (sourceTexture)
-                        drawWallpaperTexture(monitor, sourceTexture, *plan->interruptedSourceProfile);
-                    if (oldTexture) {
-                        if (plan->interruptedTransition.type == TransitionType::Fade)
-                            drawWallpaperTexture(
-                                monitor, oldTexture, *plan->previousProfile, static_cast<float>(plan->interruptedProgress));
-                        else
-                            drawWallpaperTexture(
-                                monitor,
-                                oldTexture,
-                                *plan->previousProfile,
-                                1.F,
-                                transitionClip(
-                                    plan->interruptedTransition,
-                                    plan->interruptedProgress,
-                                    plan->interruptedOrigin,
-                                    plan->logicalBounds.size,
-                                    monitor->m_scale));
-                    }
+                    drawInterruptedWallpaperPrefix(monitor, *plan, oldTexture);
                 } else if (oldTexture) {
                     drawWallpaperTexture(monitor, oldTexture, *plan->previousProfile);
                 }
