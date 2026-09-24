@@ -70,6 +70,38 @@ widget 的行为如下：
 | Hide empty workspaces | `false` | 隐藏没有窗口且当前未激活的 workspace |
 | Invert scroll direction | `false` | 反转滚轮切换方向 |
 
+### 禁用 Noctalia wallpaper
+
+启用本节下面的 Hyprland 插件前，打开 Noctalia 的 **Settings → Wallpaper**，
+关闭 **Enable the wallpaper service**，然后执行：
+
+```bash
+noctalia msg config-reload
+```
+
+也可以在 Noctalia 的用户配置目录中设置：
+
+```toml
+# ~/.config/noctalia/luxaxis.toml
+[wallpaper]
+enabled = false
+```
+
+如果 Noctalia 的 Settings 已经写入了
+`~/.local/state/noctalia/settings.toml`，该 GUI override 会覆盖用户配置文件；
+此时优先使用 Settings 开关，或在该文件中确认 `wallpaper.enabled = false`。
+这个操作只关闭 Noctalia 的壁纸 surface，不会关闭 Luxaxis workspace widget、
+bar 或桌面小组件。不要通过禁用 `yyc94/luxaxis` 插件来达到这个目的。
+
+官方依据：
+[wallpaper 配置](https://github.com/noctalia-dev/noctalia/blob/58f71922ea9ad5aa7225e88f2da80c976cc17005/docs/user/desktop/wallpaper.mdx#L8-L18)、
+[Settings 绑定](https://github.com/noctalia-dev/noctalia/blob/58f71922ea9ad5aa7225e88f2da80c976cc17005/src/shell/settings/settings_registry.cpp#L641-L646)、
+[wallpaper 生命周期](https://github.com/noctalia-dev/noctalia/blob/58f71922ea9ad5aa7225e88f2da80c976cc17005/src/shell/wallpaper/wallpaper.cpp#L413-L461)。
+
+如果只想让 Luxaxis 接管部分输出，可以保留 Noctalia wallpaper，并将不由
+Luxaxis 接管的输出加入 `excluded_outputs`；被排除的输出不会由 Luxaxis 绘制
+壁纸，但同一输出仍然只能保留一个 wallpaper owner。
+
 ### 移除
 
 先禁用插件：
