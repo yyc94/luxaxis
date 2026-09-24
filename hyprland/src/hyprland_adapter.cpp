@@ -100,6 +100,34 @@ Color parseFallbackColor() {
     return {0.0, 0.0, 0.0};
 }
 
+Length interpolateLength(const Length& from, const Length& to, const double progress) {
+    if (from.unit != to.unit)
+        return progress < 0.5 ? from : to;
+    return {std::lerp(from.value, to.value, progress), from.unit};
+}
+
+Spotlight interpolateSpotlight(const Spotlight& from, const Spotlight& to, const double progress) {
+    Spotlight result = to;
+    result.maskColor = {
+        std::lerp(from.maskColor.r, to.maskColor.r, progress),
+        std::lerp(from.maskColor.g, to.maskColor.g, progress),
+        std::lerp(from.maskColor.b, to.maskColor.b, progress),
+    };
+    result.maskOpacity = std::lerp(from.maskOpacity, to.maskOpacity, progress);
+    result.radius = interpolateLength(from.radius, to.radius, progress);
+    result.softness = interpolateLength(from.softness, to.softness, progress);
+    result.thickness = interpolateLength(from.thickness, to.thickness, progress);
+    result.anchor = {
+        std::lerp(from.anchor.x, to.anchor.x, progress),
+        std::lerp(from.anchor.y, to.anchor.y, progress),
+    };
+    result.aspectRatio = std::lerp(from.aspectRatio, to.aspectRatio, progress);
+    result.beamStartReveal = std::lerp(from.beamStartReveal, to.beamStartReveal, progress);
+    if (progress < 0.5)
+        result.orientation = from.orientation;
+    return result;
+}
+
 Config fallbackConfig() {
     Config config;
     config.defaultProfile = "default";
@@ -648,8 +676,16 @@ struct Adapter::Impl {
                 }
             };
             if (plan->transitioning && plan->previousProfile) {
-                drawMask(*plan->previousProfile, static_cast<float>(1.0 - plan->transitionProgress), "old");
-                drawMask(plan->profile, static_cast<float>(plan->transitionProgress), "new");
+                const auto& previousSpotlight = plan->previousProfile->spotlight;
+                const auto& currentSpotlight = plan->profile.spotlight;
+                if (previousSpotlight.type != SpotlightType::None && previousSpotlight.type == currentSpotlight.type) {
+                    auto interpolated = plan->profile;
+                    interpolated.spotlight = interpolateSpotlight(previousSpotlight, currentSpotlight, plan->transitionProgress);
+                    drawMask(interpolated, 1.F, "interpolated");
+                } else {
+                    drawMask(*plan->previousProfile, static_cast<float>(1.0 - plan->transitionProgress), "old");
+                    drawMask(plan->profile, static_cast<float>(plan->transitionProgress), "new");
+                }
             } else {
                 drawMask(plan->profile, 1.F, "current");
             }
