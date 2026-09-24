@@ -596,16 +596,21 @@ struct Adapter::Impl {
         // source. A default-profile fallback is allowed once the transition
         // has finished, but must not make a missing destination flash early.
         TextureHandle wallpaper;
+        const auto destinationSnapshot = cache.snapshot(plan->profile.wallpaper);
         if (plan->transitioning) {
             wallpaper = wallpaperTexture({plan->profile.wallpaper});
         } else {
             wallpaper = wallpaperTexture({plan->profile.wallpaper});
-            if (!wallpaper && cache.snapshot(plan->profile.wallpaper).status == ImageStatus::Failed)
+            if (!wallpaper && destinationSnapshot.status == ImageStatus::Failed)
                 wallpaper = wallpaperTexture(plan->wallpaperCandidates.size() > 1 ? std::vector{plan->wallpaperCandidates[1]} : std::vector<std::filesystem::path>{});
         }
 
         const CBox outputBox{{0.0, 0.0}, monitor->m_transformedSize};
         const auto currentTexture = unwrapTexture(wallpaper);
+        CRectPassElement::SRectData baseData{};
+        baseData.box = outputBox;
+        baseData.color = hyprColor(plan->fallbackColor);
+        g_pHyprRenderer->addPassElement(makeUnique<CRectPassElement>(std::move(baseData)));
         if (plan->transitioning && plan->previousProfile) {
             const auto oldTexture = unwrapTexture(wallpaperTexture({plan->previousProfile->wallpaper}));
             const auto sameWallpaper = plan->previousProfile->wallpaper == plan->profile.wallpaper;
@@ -656,13 +661,10 @@ struct Adapter::Impl {
         } else if (currentTexture) {
             lastWallpaperTextures[monitor->m_name] = LastWallpaper{currentTexture, plan->profile};
             drawWallpaperTexture(monitor, currentTexture, plan->profile);
-        } else if (const auto previous = lastWallpaperTextures.find(monitor->m_name); previous != lastWallpaperTextures.end()) {
-            drawWallpaperTexture(monitor, previous->second.texture, previous->second.profile);
-        } else {
-            CRectPassElement::SRectData data{};
-            data.box = outputBox;
-            data.color = hyprColor(plan->fallbackColor);
-            g_pHyprRenderer->addPassElement(makeUnique<CRectPassElement>(std::move(data)));
+        } else if (destinationSnapshot.status != ImageStatus::Failed) {
+            const auto previous = lastWallpaperTextures.find(monitor->m_name);
+            if (previous != lastWallpaperTextures.end())
+                drawWallpaperTexture(monitor, previous->second.texture, previous->second.profile);
         }
 
         if (plan->maskEnabled) {
@@ -676,11 +678,23 @@ struct Adapter::Impl {
                 }
             };
             if (plan->transitioning && plan->previousProfile) {
+                const auto& destinationSpotlight = plan->profile.spotlight;
                 const auto& previousSpotlight = plan->previousProfile->spotlight;
-                const auto& currentSpotlight = plan->profile.spotlight;
-                if (previousSpotlight.type != SpotlightType::None && previousSpotlight.type == currentSpotlight.type) {
+                if (plan->interruptedSourceProfile) {
+                    const auto& interruptedSpotlight = plan->interruptedSourceProfile->spotlight;
+                    const auto compositeWeight = static_cast<float>(1.0 - plan->transitionProgress);
+                    if (interruptedSpotlight.type != SpotlightType::None && interruptedSpotlight.type == previousSpotlight.type) {
+                        auto interpolated = *plan->previousProfile;
+                        interpolated.spotlight = interpolateSpotlight(interruptedSpotlight, previousSpotlight, plan->interruptedProgress);
+                        drawMask(interpolated, compositeWeight, "interrupted-interpolated");
+                    } else {
+                        drawMask(*plan->interruptedSourceProfile, compositeWeight * static_cast<float>(1.0 - plan->interruptedProgress), "interrupted-old");
+                        drawMask(*plan->previousProfile, compositeWeight * static_cast<float>(plan->interruptedProgress), "interrupted-new");
+                    }
+                    drawMask(plan->profile, static_cast<float>(plan->transitionProgress), "new");
+                } else if (previousSpotlight.type != SpotlightType::None && previousSpotlight.type == destinationSpotlight.type) {
                     auto interpolated = plan->profile;
-                    interpolated.spotlight = interpolateSpotlight(previousSpotlight, currentSpotlight, plan->transitionProgress);
+                    interpolated.spotlight = interpolateSpotlight(previousSpotlight, destinationSpotlight, plan->transitionProgress);
                     drawMask(interpolated, 1.F, "interpolated");
                 } else {
                     drawMask(*plan->previousProfile, static_cast<float>(1.0 - plan->transitionProgress), "old");
@@ -690,7 +704,7 @@ struct Adapter::Impl {
                 drawMask(plan->profile, 1.F, "current");
             }
         }
-        if (plan->transitioning)
+        if (plan->transitioning && !Fullscreen::controller()->hasFullscreen(monitor))
             g_pHyprRenderer->damageMonitor(monitor);
     }
 };

@@ -24,6 +24,8 @@ void Engine::applyConfig(Config config) {
         .durationMs = 120,
         .easing = "ease-out",
         .origin = TransitionOrigin::Cursor,
+        .point = {0.5, 0.5},
+        .randomAllowlist = {},
     };
     for (const auto& [output, state] : outputs_) {
         const auto destination = resolveProfile(state.workspace).second;
