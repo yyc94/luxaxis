@@ -41,6 +41,8 @@ local scopeIndex = 1
 local stateIndex = 1
 local selectedWorkspaceKey = nil
 local inputRevision = 0
+local pendingChoice = nil
+local expandedChoiceKey = nil
 
 local render
 
@@ -154,12 +156,74 @@ local function setField(key, value)
   render()
 end
 
+-- v5.1.0 persistent panels lack ui.select; only right clicks carry popup context.
+local function choiceControl(props)
+  local key = props.key
+  local options = props.options
+  local popupAvailable = #options <= 64
+  for _, label in ipairs(options) do
+    popupAvailable = popupAvailable and #label <= 512
+  end
+  local function expandChoice()
+    expandedChoiceKey = expandedChoiceKey ~= key and key or nil
+    render()
+  end
+  local button = ui.button({
+    key = "choice-" .. key,
+    text = options[props.selectedIndex + 1] or props.placeholder or "",
+    glyph = expandedChoiceKey == key and "chevron-up" or "chevron-down",
+    variant = "outline",
+    width = props.width,
+    enabled = props.enabled ~= false and #options > 0,
+    onClick = expandChoice,
+    onRightClick = function()
+      if not popupAvailable then
+        expandChoice()
+        return
+      end
+      local items = {}
+      for index, label in ipairs(options) do
+        table.insert(items, { id = tostring(index - 1), label = label })
+      end
+      pendingChoice = props
+      if not panel.openContextMenu({ items = items, onActivate = "onChoiceSelected", maxVisible = 12 }) then
+        pendingChoice = nil
+      end
+    end,
+  })
+  if expandedChoiceKey ~= key then
+    return button
+  end
+  local choices = { button }
+  for index, label in ipairs(options) do
+    table.insert(choices, ui.button({
+      text = label,
+      selected = props.selectedIndex == index - 1,
+      width = props.width,
+      onClick = function()
+        expandedChoiceKey = nil
+        props.onChange(tostring(index - 1))
+      end,
+    }))
+  end
+  return ui.column({ gap = 4 }, choices)
+end
+
+function onChoiceSelected(actionId)
+  local choice = pendingChoice
+  pendingChoice = nil
+  local index = tonumber(actionId)
+  if choice ~= nil and index ~= nil and index == math.floor(index) and index >= 0 and index < #choice.options then
+    choice.onChange(tostring(index))
+  end
+end
+
 local function selectorRow(label, options, values, current, key)
   local selected = indexOf(values, current) - 1
   return ui.row({ gap = 10, align = "center" }, {
     ui.label({ text = label, color = "on_surface_variant", fontSize = 12, flexGrow = 1 }),
-    ui.select({
-      key = "select-" .. key .. "-" .. tostring(inputRevision),
+    choiceControl({
+      key = key,
       options = options,
       selectedIndex = selected,
       width = 220,
@@ -214,12 +278,8 @@ end
 local function colorField(label, field, value)
   local current = value or "#00000000"
   local previewColor = styleModel.isSupportedColor(current) and current or "#00000000"
-  local pickerColor = current
-  if current:sub(1, 1) ~= "#" then
-    local role = current:match("^([a-z][a-z0-9_]*)")
-    pickerColor = role ~= nil and noctalia.getColor(role) or nil
-    pickerColor = pickerColor or "#000000"
-  end
+  -- The v5 color picker accepts only #RRGGBB, including for alpha colors.
+  local pickerColor = current:match("^(#%x%x%x%x%x%x)") or "#000000"
   return ui.column({ gap = 5 }, {
     ui.label({ text = label, color = "on_surface_variant", fontSize = 12 }),
     ui.row({ gap = 8, align = "center" }, {
@@ -354,7 +414,8 @@ local function scopeControls()
   if scope == "state" or scope == "workspace-state" then
     table.insert(rows, ui.row({ gap = 10, align = "center" }, {
       ui.label({ text = "State", color = "on_surface_variant", fontSize = 12, flexGrow = 1 }),
-      ui.select({
+      choiceControl({
+        key = "state",
         options = STATE_LABELS,
         selectedIndex = stateIndex - 1,
         width = 220,
@@ -369,7 +430,8 @@ local function scopeControls()
     local labels, keys = workspaceChoices()
     table.insert(rows, ui.row({ gap = 10, align = "center" }, {
       ui.label({ text = "Workspace", color = "on_surface_variant", fontSize = 12, flexGrow = 1 }),
-      ui.select({
+      choiceControl({
+        key = "workspace",
         options = labels,
         selectedIndex = math.max(0, indexOf(keys, selectedWorkspaceKey) - 1),
         placeholder = "No workspace",
@@ -563,7 +625,13 @@ function onCloseClicked()
   panel.close()
 end
 
+function onClose()
+  pendingChoice = nil
+  expandedChoiceKey = nil
+end
+
 function onOpen(_context)
+  onClose()
   snapshot = noctalia.state.get(WORKSPACE_STATE_KEY) or snapshot
   styleState = noctalia.state.get(STYLE_STATE_KEY) or styleState
   if type(styleState.config) == "table" then

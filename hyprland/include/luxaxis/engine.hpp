@@ -27,7 +27,6 @@ struct RenderPlan {
     const std::string profileName;
     const Profile profile;
     const std::optional<Profile> previousProfile;
-    const std::optional<Profile> interruptedSourceProfile;
     const std::vector<std::filesystem::path> wallpaperCandidates;
     const Color fallbackColor;
     const Vec2 cursorLocal;
@@ -36,9 +35,7 @@ struct RenderPlan {
     const Transition transition;
     const double transitionProgress;
     const Vec2 transitionOrigin;
-    const Transition interruptedTransition;
-    const double interruptedProgress;
-    const Vec2 interruptedOrigin;
+    const std::uint64_t transitionId;
     const bool transitioning;
     const std::uint64_t revision;
 
@@ -57,6 +54,9 @@ class Engine {
     [[nodiscard]] bool setCursor(Vec2 globalPosition);
     [[nodiscard]] bool setFocusedOutput(std::optional<std::string> output);
     void advance(std::chrono::milliseconds elapsed);
+    void advanceTo(std::chrono::milliseconds time);
+    void setTransitionReady(const std::string& output, bool ready);
+    void cancelTransition(const std::string& output);
 
     void spotlightOn();
     void spotlightOff();
@@ -80,15 +80,16 @@ class Engine {
     std::optional<std::string> focusedOutput_;
     bool spotlightEnabled_ = true;
     std::uint64_t revision_ = 1;
+    std::uint64_t nextTransitionId_ = 1;
+    std::chrono::milliseconds time_{};
 
     struct TransitionState {
         Profile previousProfile;
         Transition transition;
         std::chrono::milliseconds elapsed{};
-        std::optional<Profile> interruptedSourceProfile;
-        Transition interruptedTransition{};
-        double interruptedProgress = 0.0;
-        Vec2 interruptedOrigin{};
+        std::uint64_t id = 0;
+        bool sourceHasSpotlight = false;
+        bool ready = true;
         bool active = false;
     };
     std::map<std::string, TransitionState> transitions_;

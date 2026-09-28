@@ -14,7 +14,8 @@ void require(const bool condition, const std::string& message) {
 }
 
 luxaxis::Transition transition(luxaxis::TransitionType type) {
-    return {.type = type, .durationMs = 100, .easing = "linear", .origin = luxaxis::TransitionOrigin::Center};
+    return {.type = type, .durationMs = 100, .easing = "linear", .origin = luxaxis::TransitionOrigin::Center,
+            .point = {0.5, 0.5}, .randomAllowlist = {}};
 }
 
 luxaxis::Transition randomTransition() {
@@ -48,10 +49,16 @@ void growUsesTheFarthestCornerFromItsOrigin() {
             "grow did not scale to its farthest corner");
 }
 
+void clockDefinesItsOriginForNonemptySweeps() {
+    const auto spec = transition(luxaxis::TransitionType::Clock);
+    require(luxaxis::transitionReveal(spec, 0, {50, 50}, {100, 100}, {50, 50}) == 0, "clock origin did not start hidden");
+    require(luxaxis::transitionReveal(spec, 0.001, {50, 50}, {100, 100}, {50, 50}) == 1, "nonempty clock sector does not contain its origin");
+}
+
 void engineInterruptsInsteadOfQueueing() {
     luxaxis::Config config;
     config.defaultProfile = "default";
-    config.profiles.emplace("default", luxaxis::Profile{.wallpaper = "/wall/default.png"});
+    config.profiles.emplace("default", luxaxis::Profile{.wallpaper = "/wall/default.png", .transition = std::nullopt});
     auto destination = luxaxis::Profile{.wallpaper = "/wall/one.png", .transition = transition(luxaxis::TransitionType::Fade)};
     config.profiles.emplace("one", destination);
     config.profiles.emplace("two", luxaxis::Profile{.wallpaper = "/wall/two.png", .transition = transition(luxaxis::TransitionType::Wipe)});
@@ -67,19 +74,42 @@ void engineInterruptsInsteadOfQueueing() {
     require(engine.activateWorkspace("DP-1", 2), "second workspace did not activate");
     const auto interrupted = engine.planFor("DP-1");
     require(interrupted->transition.type == luxaxis::TransitionType::Wipe, "destination did not own interrupted transition");
-    require(interrupted->previousProfile && interrupted->previousProfile->wallpaper == "/wall/one.png", "interruption did not capture current destination");
-    require(interrupted->interruptedSourceProfile && interrupted->interruptedSourceProfile->wallpaper == "/wall/default.png",
-            "interruption did not retain the in-flight source profile");
-    require(interrupted->interruptedProgress > 0.0 && interrupted->interruptedProgress < 1.0,
-            "interruption did not retain the in-flight progress");
+    require(interrupted->previousProfile && interrupted->previousProfile->wallpaper == "/wall/one.png", "interruption did not retain prior destination metadata");
+    require(interrupted->transitionId != first->transitionId && interrupted->transitionProgress == 0.0,
+            "interruption did not immediately start a new capture interval");
+    require(interrupted->profile.wallpaper == "/wall/two.png", "manual switching queued the newest destination");
     engine.advance(std::chrono::milliseconds{100});
     require(!engine.planFor("DP-1")->transitioning, "transition did not complete");
+}
+
+void loadingPausesTheTransitionAndAbsoluteTimeIsNotCountedTwice() {
+    luxaxis::Config config;
+    config.defaultProfile = "default";
+    config.profiles.emplace("default", luxaxis::Profile{.wallpaper = "/wall/default.png", .transition = std::nullopt});
+    config.profiles.emplace("one", luxaxis::Profile{.wallpaper = "/wall/one.png", .transition = transition(luxaxis::TransitionType::Fade)});
+    config.workspaces.emplace(1, "one");
+    luxaxis::Engine engine{config};
+    engine.advanceTo(std::chrono::milliseconds{1000});
+    (void)engine.upsertOutput({"DP-1", {{0, 0}, {100, 100}}, std::nullopt});
+    (void)engine.upsertOutput({"DP-2", {{100, 0}, {100, 100}}, std::nullopt});
+    (void)engine.activateWorkspace("DP-1", 1);
+    (void)engine.activateWorkspace("DP-2", 1);
+    engine.setTransitionReady("DP-1", false);
+    engine.advanceTo(std::chrono::milliseconds{2000});
+    require(engine.planFor("DP-1")->transitionProgress == 0.0, "decode waiting consumed the transition interval");
+    require(!engine.planFor("DP-2")->transitioning, "one pending output stalled another output's transition");
+    engine.setTransitionReady("DP-1", true);
+    engine.advanceTo(std::chrono::milliseconds{2040});
+    engine.advanceTo(std::chrono::milliseconds{2040});
+    require(engine.planFor("DP-1")->transitionProgress == 0.4, "multiple outputs counted the same frame time twice");
+    engine.advanceTo(std::chrono::milliseconds{2100});
+    require(!engine.planFor("DP-1")->transitioning, "ready transition failed to finish");
 }
 
 void randomTransitionsAvoidImmediateRepeats() {
     luxaxis::Config config;
     config.defaultProfile = "default";
-    config.profiles.emplace("default", luxaxis::Profile{.wallpaper = "/wall/default.png"});
+    config.profiles.emplace("default", luxaxis::Profile{.wallpaper = "/wall/default.png", .transition = std::nullopt});
     config.profiles.emplace("one", luxaxis::Profile{.wallpaper = "/wall/one.png", .transition = randomTransition()});
     config.profiles.emplace("two", luxaxis::Profile{.wallpaper = "/wall/two.png", .transition = randomTransition()});
     config.workspaces.emplace(1, "one");
@@ -102,7 +132,9 @@ int main() {
         allTransitionTypesReachDestination();
         easingIsBounded();
         growUsesTheFarthestCornerFromItsOrigin();
+        clockDefinesItsOriginForNonemptySweeps();
         engineInterruptsInsteadOfQueueing();
+        loadingPausesTheTransitionAndAbsoluteTimeIsNotCountedTwice();
         randomTransitionsAvoidImmediateRepeats();
     } catch (const std::exception& error) {
         std::cerr << "transition_test: " << error.what() << '\n';

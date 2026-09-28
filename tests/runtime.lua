@@ -37,6 +37,7 @@ local stateValues = {}
 local dispatches = {}
 local notifications = {}
 local streamCallback = nil
+local pickedColors = {}
 local config = { hide_when_empty = false, invert_scroll = false }
 
 local function stateSet(key, value)
@@ -115,10 +116,8 @@ local noctalia = {
   getConfig = function(key)
     return config[key]
   end,
-  getColor = function()
-    return "#ffffff"
-  end,
-  openColorPicker = function()
+  openColorPicker = function(color)
+    table.insert(pickedColors, color)
     return true
   end,
   copyToClipboard = function()
@@ -253,6 +252,19 @@ local function uiNode(kind)
   end
 end
 
+local function findNode(node, predicate)
+  if predicate(node) then
+    return node
+  end
+  for _, child in ipairs(node.children or {}) do
+    local found = findNode(child, predicate)
+    if found ~= nil then
+      return found
+    end
+  end
+  return nil
+end
+
 local ui = {}
 for _, kind in ipairs({ "column", "row", "scroll", "box", "label", "glyph", "image", "separator", "spacer", "progress", "button", "input", "select", "slider", "toggle" }) do
   ui[kind] = uiNode(kind)
@@ -261,6 +273,7 @@ end
 local function widgetFor(output)
   local rendered = nil
   local visible = nil
+  local tooltip = nil
   local barWidget = {
     outputName = function()
       return output
@@ -274,12 +287,16 @@ local function widgetFor(output)
     render = function(value)
       rendered = value
     end,
-    setTooltip = function() end,
-    clearTooltip = function() end,
+    setTooltip = function(value)
+      tooltip = value
+    end,
+    clearTooltip = function()
+      tooltip = nil
+    end,
   }
   local environment = loadEntry("widget.luau", { ui = ui, barWidget = barWidget })
   return environment, function()
-    return rendered, visible
+    return rendered, visible, tooltip
   end
 end
 
@@ -306,6 +323,18 @@ run("workspace row click reaches the validated service", function()
   secondWorkspace.props.onClick()
   equal(#dispatches, before + 1)
   equal(dispatches[#dispatches][3], 'hl.dsp.focus({ workspace = "2" })')
+end)
+
+run("workspace tooltips use the released v5 hover callback", function()
+  local tree = internalView()
+  local row = tree.children[1]
+  equal(row.props.tooltip, nil, "container tooltip requires an unreleased API")
+  row.props.onHover("true")
+  local _, _, tooltip = internalView()
+  equal(tooltip, "1 - active")
+  row.props.onHover("false")
+  local _, _, cleared = internalView()
+  equal(cleared, nil)
 end)
 
 run("scroll sends one bounded step per gesture", function()
@@ -340,19 +369,6 @@ run("style panel loads and renders without mutating workspace configuration", fu
   equal(panelTree.type, "column")
   equal(#dispatches, before)
 
-  local function findNode(node, predicate)
-    if predicate(node) then
-      return node
-    end
-    for _, child in ipairs(node.children or {}) do
-      local found = findNode(child, predicate)
-      if found ~= nil then
-        return found
-      end
-    end
-    return nil
-  end
-
   local toggle = assert(findNode(panelTree, function(node)
     return node.type == "toggle"
   end))
@@ -367,6 +383,74 @@ run("style panel loads and renders without mutating workspace configuration", fu
   equal(stateValues["luxaxis.styles"].revision, styleRevision + 1)
   equal(stateValues["luxaxis.styles"].config.base.labelVisible, false)
   equal(#dispatches, before)
+end)
+
+run("style choices work in a persistent v5 panel through native menus", function()
+  local panelTree
+  local menu
+  local panelEntry = loadEntry("panel.luau", { ui = ui, panel = {
+    render = function(tree) panelTree = tree end,
+    openContextMenu = function(request) menu = request; return true end,
+    close = function() end,
+  } })
+  panelEntry.onOpen(nil)
+  equal(findNode(panelTree, function(node) return node.type == "select" end), nil)
+  local choice = assert(findNode(panelTree, function(node) return node.props.key == "choice-labelSource" end))
+  choice.props.onRightClick()
+  equal(menu.onActivate, "onChoiceSelected")
+  equal(#menu.items, 3)
+  panelEntry.onChoiceSelected(menu.items[3].id)
+  assert(findNode(panelTree, function(node) return node.type == "input" and node.props.placeholder == "Workspace label" end))
+  choice = assert(findNode(panelTree, function(node) return node.props.key == "choice-labelSource" end))
+  choice.props.onClick()
+  local name = assert(findNode(panelTree, function(node) return node.type == "button" and node.props.text == "Name" end))
+  name.props.onClick()
+  equal(findNode(panelTree, function(node) return node.props.placeholder == "Workspace label" end), nil)
+  panelEntry.onClose()
+  panelEntry.onChoiceSelected(menu.items[1].id)
+end)
+
+run("color picker always receives six-digit RGB without unreleased getColor", function()
+  local panelTree
+  local panelEntry = loadEntry("panel.luau", { ui = ui, panel = {
+    render = function(tree) panelTree = tree end,
+    close = function() end,
+  } })
+  panelEntry.onOpen(nil)
+  local picker = assert(findNode(panelTree, function(node) return node.props.glyph == "color-picker" end))
+  picker.props.onClick()
+  equal(pickedColors[#pickedColors], "#000000", "theme roles use the release-compatible fallback")
+  local input = assert(findNode(panelTree, function(node)
+    return node.type == "input" and (node.props.key or ""):match("^color%-foreground%-%d+$")
+  end))
+  input.props.onChange("#12ab34ef")
+  picker = assert(findNode(panelTree, function(node) return node.props.glyph == "color-picker" end))
+  picker.props.onClick()
+  equal(pickedColors[#pickedColors], "#12ab34", "alpha must not be passed to the RGB picker")
+end)
+
+run("workspace choices exceeding the native menu limit remain selectable", function()
+  local workspaces = {}
+  for index = 1, 70 do
+    table.insert(workspaces, { key = tostring(index), name = tostring(index), output = "eDP-1" })
+  end
+  local panelTree
+  local panelEntry = loadEntry("panel.luau", { ui = ui, panel = {
+    render = function(tree) panelTree = tree end,
+    openContextMenu = function() fail("an oversized native menu must not be opened") end,
+    close = function() end,
+  } })
+  panelEntry.onOpen(nil)
+  local panelWatcher = watchers["luxaxis.workspace-state"][#watchers["luxaxis.workspace-state"]]
+  panelWatcher({ available = true, workspaces = workspaces, diagnostics = {} })
+  local scope = assert(findNode(panelTree, function(node) return node.props.key == "scope-workspace" end))
+  scope.props.onClick()
+  local choice = assert(findNode(panelTree, function(node) return node.props.key == "choice-workspace" end))
+  choice.props.onRightClick()
+  local last = assert(findNode(panelTree, function(node) return node.type == "button" and node.props.text == "eDP-1 / 70" end))
+  last.props.onClick()
+  choice = assert(findNode(panelTree, function(node) return node.props.key == "choice-workspace" end))
+  equal(choice.props.text, "eDP-1 / 70")
 end)
 
 io.write(string.format("\n%d passed, %d failed\n", passed, failed))

@@ -264,8 +264,8 @@ position = [0.5, 0.5]
 type = "circle"
 mask_color = "#000000"
 mask_opacity = 0.55
-radius = "18%"
-softness = "4%"
+radius = "60px"
+softness = "8px"
 
 [profiles.beam]
 wallpaper = "~/Pictures/beam.jpg"
@@ -277,7 +277,7 @@ mask_opacity = 0.68
 anchor = [0.5, 0.08]
 radius = "18%"
 aspect_ratio = 0.55
-softness = "4%"
+softness = "8px"
 beam_start_reveal = 0.35
 
 [workspaces]

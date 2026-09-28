@@ -31,14 +31,16 @@ void Engine::applyConfig(Config config) {
         const auto destination = resolveProfile(state.workspace).second;
         const auto previous = oldProfiles.find(output);
         if (previous != oldProfiles.end() && previous->second != destination) {
+            const auto interrupted = transitions_.find(output);
+            const bool sourceHasSpotlight = previous->second.spotlight.type != SpotlightType::None ||
+                (interrupted != transitions_.end() && interrupted->second.sourceHasSpotlight);
             transitions_[output] = TransitionState{
                 .previousProfile = previous->second,
                 .transition = reloadTransition,
                 .elapsed = {},
-                .interruptedSourceProfile = std::nullopt,
-                .interruptedTransition = {},
-                .interruptedProgress = 0.0,
-                .interruptedOrigin = {},
+                .id = nextTransitionId_++,
+                .sourceHasSpotlight = sourceHasSpotlight,
+                .ready = true,
                 .active = true,
             };
         } else {
@@ -121,9 +123,10 @@ bool Engine::setFocusedOutput(std::optional<std::string> output) {
 void Engine::advance(const std::chrono::milliseconds elapsed) {
     if (elapsed.count() <= 0)
         return;
+    time_ += elapsed;
     bool changedState = false;
     for (auto& [output, state] : transitions_) {
-        if (!state.active)
+        if (!state.active || !state.ready)
             continue;
         state.elapsed += elapsed;
         if (state.elapsed.count() >= state.transition.durationMs) {
@@ -139,6 +142,23 @@ void Engine::advance(const std::chrono::milliseconds elapsed) {
             ++iterator;
     }
     if (changedState)
+        changed();
+}
+
+void Engine::advanceTo(const std::chrono::milliseconds time) {
+    if (time > time_)
+        advance(time - time_);
+}
+
+void Engine::setTransitionReady(const std::string& output, const bool ready) {
+    if (const auto state = transitions_.find(output); state != transitions_.end() && state->second.ready != ready) {
+        state->second.ready = ready;
+        changed();
+    }
+}
+
+void Engine::cancelTransition(const std::string& output) {
+    if (transitions_.erase(output))
         changed();
 }
 
@@ -200,26 +220,22 @@ std::optional<RenderPlan> Engine::planFor(const std::string& outputName) const {
     const auto cursorLocal = Vec2{cursor_.x - output->second.logicalBounds.position.x, cursor_.y - output->second.logicalBounds.position.y};
     const auto configuredTransition = profile.transition.value_or(config_.transition.value_or(Transition{}));
     std::optional<Profile> previousProfile;
-    std::optional<Profile> interruptedSourceProfile;
     auto activeTransition = configuredTransition;
     double transitionProgress = 1.0;
-    auto interruptedTransition = Transition{};
-    double interruptedProgress = 0.0;
-    auto interruptedOrigin = Vec2{};
+    std::uint64_t transitionId = 0;
     bool transitioning = false;
+    bool sourceHasSpotlight = false;
     if (const auto state = transitions_.find(outputName); state != transitions_.end() && state->second.active) {
         previousProfile = state->second.previousProfile;
-        interruptedSourceProfile = state->second.interruptedSourceProfile;
         activeTransition = state->second.transition;
         transitionProgress = std::clamp(
             static_cast<double>(state->second.elapsed.count()) / static_cast<double>(state->second.transition.durationMs), 0.0, 1.0);
-        interruptedTransition = state->second.interruptedTransition;
-        interruptedProgress = state->second.interruptedProgress;
-        interruptedOrigin = state->second.interruptedOrigin;
+        transitionId = state->second.id;
+        sourceHasSpotlight = state->second.sourceHasSpotlight;
         transitioning = true;
     }
     const bool hasSpotlight = spotlightEnabled_ &&
-        (profile.spotlight.type != SpotlightType::None || (transitioning && previousProfile && previousProfile->spotlight.type != SpotlightType::None));
+        (profile.spotlight.type != SpotlightType::None || sourceHasSpotlight);
 
     const auto& defaultWallpaper = config_.profiles.at(config_.defaultProfile).wallpaper;
     std::vector<std::filesystem::path> wallpaperCandidates{profile.wallpaper};
@@ -231,8 +247,6 @@ std::optional<RenderPlan> Engine::planFor(const std::string& outputName) const {
     };
     if (previousProfile)
         addCandidate(previousProfile->wallpaper);
-    if (interruptedSourceProfile)
-        addCandidate(interruptedSourceProfile->wallpaper);
     const auto transitionOriginPoint = transitionOrigin(activeTransition, output->second);
     if (!spotlightEnabled_)
         return RenderPlan{
@@ -242,7 +256,6 @@ std::optional<RenderPlan> Engine::planFor(const std::string& outputName) const {
             .profileName = profileName,
             .profile = Profile{profile.wallpaper, profile.fit, profile.position, {}, profile.transition},
             .previousProfile = previousProfile,
-            .interruptedSourceProfile = interruptedSourceProfile,
             .wallpaperCandidates = std::move(wallpaperCandidates),
             .fallbackColor = config_.fallbackColor,
             .cursorLocal = cursorLocal,
@@ -251,9 +264,7 @@ std::optional<RenderPlan> Engine::planFor(const std::string& outputName) const {
             .transition = activeTransition,
             .transitionProgress = transitionProgress,
             .transitionOrigin = transitionOriginPoint,
-            .interruptedTransition = interruptedTransition,
-            .interruptedProgress = interruptedProgress,
-            .interruptedOrigin = interruptedOrigin,
+            .transitionId = transitionId,
             .transitioning = transitioning,
             .revision = revision_,
         };
@@ -264,7 +275,6 @@ std::optional<RenderPlan> Engine::planFor(const std::string& outputName) const {
         .profileName = profileName,
         .profile = profile,
         .previousProfile = previousProfile,
-        .interruptedSourceProfile = interruptedSourceProfile,
         .wallpaperCandidates = std::move(wallpaperCandidates),
         .fallbackColor = config_.fallbackColor,
         .cursorLocal = cursorLocal,
@@ -273,9 +283,7 @@ std::optional<RenderPlan> Engine::planFor(const std::string& outputName) const {
         .transition = activeTransition,
         .transitionProgress = transitionProgress,
         .transitionOrigin = transitionOriginPoint,
-        .interruptedTransition = interruptedTransition,
-        .interruptedProgress = interruptedProgress,
-        .interruptedOrigin = interruptedOrigin,
+        .transitionId = transitionId,
         .transitioning = transitioning,
         .revision = revision_,
     };
@@ -337,23 +345,18 @@ void Engine::startTransition(const std::string& output, const std::optional<std:
     }
 
     const auto source = resolveProfile(oldWorkspace).second;
+    const auto interrupted = transitions_.find(output);
+    const bool sourceHasSpotlight = source.spotlight.type != SpotlightType::None ||
+        (interrupted != transitions_.end() && interrupted->second.sourceHasSpotlight);
     TransitionState next{
         .previousProfile = source,
         .transition = transition,
         .elapsed = {},
-        .interruptedSourceProfile = std::nullopt,
-        .interruptedTransition = {},
-        .interruptedProgress = 0.0,
-        .interruptedOrigin = {},
+        .id = nextTransitionId_++,
+        .sourceHasSpotlight = sourceHasSpotlight,
+        .ready = true,
         .active = true,
     };
-    if (const auto previous = transitions_.find(output); previous != transitions_.end() && previous->second.active) {
-        next.interruptedSourceProfile = previous->second.previousProfile;
-        next.interruptedTransition = previous->second.transition;
-        next.interruptedProgress = std::clamp(
-            static_cast<double>(previous->second.elapsed.count()) / static_cast<double>(previous->second.transition.durationMs), 0.0, 1.0);
-        next.interruptedOrigin = transitionOrigin(previous->second.transition, outputs_.at(output));
-    }
     transitions_[output] = std::move(next);
 }
 

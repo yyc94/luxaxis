@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir=$(dirname "${BASH_SOURCE[0]}")
+if [[ "$1" == -j ]]; then
+  case "$2" in
+    workspaces|workspacerules|monitors|clients|status) exec cat "$fixture_dir/$2.json" ;;
+  esac
+elif [[ "$1" == dispatch ]]; then
+  printf '%s\n' "$@" >> "$LUXAXIS_TEST_DISPATCH_LOG"
+  printf 'ok\n'
+  exit 0
+fi
+exit 1

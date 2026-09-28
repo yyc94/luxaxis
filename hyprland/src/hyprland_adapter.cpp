@@ -1,20 +1,20 @@
 #include "hyprland_adapter.hpp"
 
-#include "luxaxis/spotlight.hpp"
-#include "luxaxis/transition.hpp"
+#include "luxaxis/gpu_renderer.hpp"
 
 #include <src/Compositor.hpp>
 #include <src/SharedDefs.hpp>
 #include <src/debug/log/Logger.hpp>
 #include <src/desktop/Workspace.hpp>
 #include <src/desktop/state/FocusState.hpp>
+#include <src/desktop/view/Window.hpp>
 #include <src/event/EventBus.hpp>
 #include <src/helpers/math/Math.hpp>
 #include <src/managers/fullscreen/FullscreenController.hpp>
 #include <src/output/Monitor.hpp>
 #include <src/pointer/PointerManager.hpp>
 #include <src/render/Renderer.hpp>
-#include <src/render/pass/ClearPassElement.hpp>
+#include <src/render/OpenGL.hpp>
 #include <src/render/pass/RectPassElement.hpp>
 #include <src/render/pass/TexPassElement.hpp>
 #include <src/state/MonitorState.hpp>
@@ -24,19 +24,18 @@
 #include <wayland-server-core.h>
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <fstream>
+#include <functional>
 #include <fcntl.h>
 #include <limits>
 #include <mutex>
 #include <optional>
-#include <sstream>
+#include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
@@ -117,32 +116,56 @@ Color parseFallbackColor() {
     return {0.0, 0.0, 0.0};
 }
 
-Length interpolateLength(const Length& from, const Length& to, const double progress) {
-    if (from.unit != to.unit)
-        return progress < 0.5 ? from : to;
-    return {std::lerp(from.value, to.value, progress), from.unit};
+class GpuTexture final : public Render::ITexture {
+  public:
+    explicit GpuTexture(std::shared_ptr<const gpu::Texture> texture) : texture_(std::move(texture)) {
+        m_texID = texture_->id();
+        m_size = {texture_->size().x, texture_->size().y};
+        m_drmFormat = DRM_FORMAT_ABGR8888;
+        m_opaque = true;
+        m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
+    }
+    void setTexParameter(GLenum name, GLint value) override { glTexParameteri(GL_TEXTURE_2D, name, value); }
+    void allocate(const Vector2D&, uint32_t) override { throw std::logic_error("Luxaxis GPU texture is read-only"); }
+    void update(uint32_t, uint8_t*, uint32_t, const CRegion&) override { throw std::logic_error("Luxaxis GPU texture is read-only"); }
+    void bind() override { glBindTexture(GL_TEXTURE_2D, m_texID); }
+    void unbind() override { glBindTexture(GL_TEXTURE_2D, 0); }
+    bool ok() override { return m_texID != 0; }
+    bool isDMA() override { return false; }
+
+  private:
+    std::shared_ptr<const gpu::Texture> texture_;
+};
+
+class WallpaperPass final : public IPassElement {
+  public:
+    WallpaperPass(const Vec2 size, std::function<std::vector<UP<IPassElement>>()> draw) : size_(size), draw_(std::move(draw)) {}
+    std::vector<UP<IPassElement>> draw() override { return draw_(); }
+    bool needsLiveBlur() override { return false; }
+    bool needsPrecomputeBlur() override { return false; }
+    const char* passName() override { return "LuxaxisWallpaper"; }
+    ePassElementType type() override { return EK_CUSTOM; }
+    std::optional<CBox> boundingBox() override { return CBox{0, 0, size_.x, size_.y}; }
+    CRegion opaqueRegion() override { return CRegion{CBox{0, 0, size_.x, size_.y}}; }
+
+  private:
+    Vec2 size_;
+    std::function<std::vector<UP<IPassElement>>()> draw_;
+};
+
+std::chrono::milliseconds engineTime() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch());
 }
 
-Spotlight interpolateSpotlight(const Spotlight& from, const Spotlight& to, const double progress) {
-    Spotlight result = to;
-    result.maskColor = {
-        std::lerp(from.maskColor.r, to.maskColor.r, progress),
-        std::lerp(from.maskColor.g, to.maskColor.g, progress),
-        std::lerp(from.maskColor.b, to.maskColor.b, progress),
-    };
-    result.maskOpacity = std::lerp(from.maskOpacity, to.maskOpacity, progress);
-    result.radius = interpolateLength(from.radius, to.radius, progress);
-    result.softness = interpolateLength(from.softness, to.softness, progress);
-    result.thickness = interpolateLength(from.thickness, to.thickness, progress);
-    result.anchor = {
-        std::lerp(from.anchor.x, to.anchor.x, progress),
-        std::lerp(from.anchor.y, to.anchor.y, progress),
-    };
-    result.aspectRatio = std::lerp(from.aspectRatio, to.aspectRatio, progress);
-    result.beamStartReveal = std::lerp(from.beamStartReveal, to.beamStartReveal, progress);
-    if (progress < 0.5)
-        result.orientation = from.orientation;
-    return result;
+bool wallpaperOccluded(PHLMONITOR monitor) {
+    const auto window = Fullscreen::controller()->getFullscreenWindow(monitor);
+    if (!window || !window->opaque())
+        return false;
+    const auto position = window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const auto size = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    return position.x <= monitor->m_position.x && position.y <= monitor->m_position.y &&
+        position.x + size.x >= monitor->m_position.x + monitor->m_size.x &&
+        position.y + size.y >= monitor->m_position.y + monitor->m_size.y;
 }
 
 class MainThreadWake {
@@ -373,24 +396,17 @@ struct Adapter::Impl {
     WallpaperWatcher wallpaperWatcher;
     std::mutex errorMutex;
     std::optional<Error> lastConfigError;
-    std::unordered_map<std::string, TextureHandle> maskTextures;
-    struct MaskState {
-        Spotlight spotlight;
-        Vec2 outputSize;
-        Vec2 cursor;
-        bool revealEnabled = false;
-        wl_output_transform transform = WL_OUTPUT_TRANSFORM_NORMAL;
-    };
-    std::unordered_map<std::string, MaskState> maskStates;
-    std::unordered_map<std::string, Vec2> fanDirections;
+    std::unordered_map<std::string, std::unique_ptr<gpu::Renderer>> gpuRenderers;
+    std::unordered_map<std::string, SP<Render::ITexture>> gpuTextures;
+    std::unordered_map<std::string, std::string> gpuErrors;
     struct LastWallpaper {
         std::filesystem::path path;
         Profile profile;
     };
     std::unordered_map<std::string, LastWallpaper> lastWallpaperTextures;
     struct ReplacementFade {
-        TextureHandle previousTexture;
         std::chrono::steady_clock::time_point started;
+        std::uint64_t id;
     };
     std::unordered_map<std::filesystem::path, ReplacementFade> replacementFades;
     std::unordered_set<std::filesystem::path> reportedImageErrors;
@@ -403,7 +419,7 @@ struct Adapter::Impl {
     CHyprSignalListener cursorMove;
     SP<SHyprCtlCommand> reloadCommand;
     SP<SHyprCtlCommand> spotlightCommand;
-    std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
+    std::uint64_t nextReplacementId = 1ULL << 63U;
 
     Impl(HANDLE pluginHandle, std::filesystem::path source, std::filesystem::path homePath, Config initial)
         : handle(pluginHandle), configPath(std::move(source)), home(std::move(homePath)), config(std::move(initial)), engine(config),
@@ -443,10 +459,11 @@ struct Adapter::Impl {
             if (monitor) {
                 (void)engine.removeOutput(monitor->m_name);
                 lastWallpaperTextures.erase(monitor->m_name);
-                fanDirections.erase(monitor->m_name);
-                const auto prefix = monitor->m_name + ":";
-                std::erase_if(maskTextures, [&prefix](const auto& item) { return item.first.starts_with(prefix); });
-                std::erase_if(maskStates, [&prefix](const auto& item) { return item.first.starts_with(prefix); });
+                if (Render::GL::g_pHyprOpenGL)
+                    Render::GL::g_pHyprOpenGL->makeEGLCurrent();
+                gpuTextures.erase(monitor->m_name);
+                gpuRenderers.erase(monitor->m_name);
+                gpuErrors.erase(monitor->m_name);
             }
             damageManagedOutputs();
         });
@@ -459,11 +476,9 @@ struct Adapter::Impl {
                 damageOutput(*current);
         });
         cursorMove = Event::bus()->m_events.input.mouse.move.listen([this](Vector2D position, Event::SCallbackInfo&) {
-            const auto beforePlans = engine.plans();
             const auto previous = engine.activeOutput();
             if (!engine.setCursor({position.x, position.y}))
                 return;
-            const auto afterPlans = engine.plans();
             const auto current = engine.activeOutput();
             if (previous != current) {
                 if (previous)
@@ -475,41 +490,30 @@ struct Adapter::Impl {
             if (!current)
                 return;
 
-            const auto after = std::ranges::find_if(afterPlans, [&current](const auto& plan) { return plan.output == *current; });
-            if (after == afterPlans.end())
+            const auto after = engine.planFor(*current);
+            if (!after)
                 return;
-            const auto before = std::ranges::find_if(beforePlans, [&current](const auto& plan) { return plan.output == *current; });
-            if (after->transitioning || (before != beforePlans.end() && before->transitioning)) {
+            if (after->transitioning) {
                 damageOutput(*current);
                 return;
             }
 
-            CRegion changedRegion;
-            const auto addEffectBounds = [this, &changedRegion](const RenderPlan& plan) {
-                if (!plan.maskEnabled || !plan.revealEnabled)
-                    return;
-                const auto sample = SpotlightSample{
-                    .spotlight = plan.profile.spotlight,
-                    .outputSize = {plan.logicalBounds.size.x, plan.logicalBounds.size.y},
-                    .cursor = plan.cursorLocal,
-                    .revealEnabled = true,
-                    .fanDirection = fanDirections.contains(plan.output) ? fanDirections.at(plan.output) : Vec2{0.0, 1.0},
-                };
-                if (const auto bounds = spotlightEffectBounds(sample))
-                    changedRegion.add(CBox{
-                        plan.logicalBounds.position.x + bounds->position.x,
-                        plan.logicalBounds.position.y + bounds->position.y,
-                        bounds->size.x,
-                        bounds->size.y,
-                    });
-            };
-            if (before != beforePlans.end())
-                addEffectBounds(*before);
-            addEffectBounds(*after);
+            const auto renderer = gpuRenderers.find(*current);
+            if (renderer == gpuRenderers.end())
+                return;
+            const auto bounds = renderer->second->cursorDamage(after->cursorLocal);
+            if (!bounds)
+                return;
+            const CRegion changedRegion{CBox{
+                after->logicalBounds.position.x + bounds->position.x,
+                after->logicalBounds.position.y + bounds->position.y,
+                bounds->size.x,
+                bounds->size.y,
+            }};
             const auto monitor = std::ranges::find_if(
                 State::monitorState()->monitors(), [&current](const auto& candidate) { return candidate && candidate->m_name == *current; });
             if (!changedRegion.empty() && monitor != State::monitorState()->monitors().end() &&
-                !Fullscreen::controller()->hasFullscreen(*monitor))
+                !wallpaperOccluded(*monitor))
                 g_pHyprRenderer->damageRegion(changedRegion);
         });
     }
@@ -524,19 +528,27 @@ struct Adapter::Impl {
         monitorRemoved.reset();
         monitorFocused.reset();
         cursorMove.reset();
-        maskTextures.clear();
+        if (Render::GL::g_pHyprOpenGL)
+            Render::GL::g_pHyprOpenGL->makeEGLCurrent();
+        if (g_pHyprRenderer)
+            g_pHyprRenderer->currentPass().removeAllOfType("LuxaxisWallpaper");
+        gpuTextures.clear();
+        gpuRenderers.clear();
         replacementFades.clear();
     }
 
     void syncOutput(PHLMONITOR monitor) {
         if (!monitor)
             return;
+        engine.advanceTo(engineTime());
         const auto workspace = normalWorkspace(monitor->m_activeWorkspace);
         (void)engine.upsertOutput({
             .name = monitor->m_name,
             .logicalBounds = {{monitor->m_position.x, monitor->m_position.y}, {monitor->m_size.x, monitor->m_size.y}},
             .workspace = workspace > 0 ? std::optional{workspace} : std::nullopt,
         });
+        if (const auto plan = engine.planFor(monitor->m_name))
+            engine.setTransitionReady(monitor->m_name, static_cast<bool>(cache.texture(plan->profile.wallpaper)));
     }
 
     void syncOutputs() {
@@ -550,7 +562,7 @@ struct Adapter::Impl {
 
     void damageManagedOutputs() {
         for (const auto& monitor : State::monitorState()->monitors())
-            if (monitor && !Fullscreen::controller()->hasFullscreen(monitor) && engine.planFor(monitor->m_name))
+            if (monitor && !wallpaperOccluded(monitor) && engine.planFor(monitor->m_name))
                 g_pHyprRenderer->damageMonitor(monitor);
     }
 
@@ -560,7 +572,7 @@ struct Adapter::Impl {
 
     void damageOutput(const std::string& name) {
         for (const auto& monitor : State::monitorState()->monitors())
-            if (monitor && monitor->m_name == name && !Fullscreen::controller()->hasFullscreen(monitor) && engine.planFor(name)) {
+            if (monitor && monitor->m_name == name && !wallpaperOccluded(monitor) && engine.planFor(name)) {
                 g_pHyprRenderer->damageMonitor(monitor);
                 return;
             }
@@ -571,10 +583,19 @@ struct Adapter::Impl {
         if (auto candidate = watcher.takeConfig(error)) {
             config = std::move(*candidate);
             engine.applyConfig(config);
+            for (const auto& plan : engine.plans())
+                engine.setTransitionReady(plan.output, static_cast<bool>(cache.texture(plan.profile.wallpaper)));
             cache.setBudget(config.textureCacheBytes);
             wallpaperWatcher.setPaths(config);
-            maskTextures.clear();
-            maskStates.clear();
+            for (const auto& excluded : config.excludedOutputs) {
+                gpuTextures.erase(excluded);
+                gpuRenderers.erase(excluded);
+                gpuErrors.erase(excluded);
+                lastWallpaperTextures.erase(excluded);
+                for (const auto& monitor : State::monitorState()->monitors())
+                    if (monitor && monitor->m_name == excluded)
+                        g_pHyprRenderer->damageMonitor(monitor);
+            }
             const auto paths = wallpaperPaths(config);
             std::erase_if(reportedImageErrors, [&paths](const auto& path) { return !paths.contains(path); });
             damageManagedOutputs();
@@ -586,72 +607,6 @@ struct Adapter::Impl {
             lastConfigError = std::move(error);
         }
     }
-
-    TextureHandle createMaskTexture(PHLMONITOR monitor, const RenderPlan& plan, const Profile& profile, const bool revealEnabled) {
-        constexpr std::uint32_t width = 192;
-        constexpr std::uint32_t height = 192;
-        // Spotlight units and cursor coordinates are logical. The generated
-        // mask is uploaded at the transformed pixel size and stretched by the
-        // render pass, so geometry remains scale-independent.
-        const auto outputSize = plan.logicalBounds.size;
-        if (!revealEnabled) {
-            std::array pixels{
-                static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.r, 0.0, 1.0) * 255.0),
-                static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.g, 0.0, 1.0) * 255.0),
-                static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.b, 0.0, 1.0) * 255.0),
-                static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskOpacity, 0.0, 1.0) * 255.0),
-            };
-            return wrapTexture(g_pHyprRenderer->createTexture(DRM_FORMAT_ABGR8888, pixels.data(), 4U, {1.0, 1.0}, false, false));
-        }
-        const auto anchor = Vec2{profile.spotlight.anchor.x * outputSize.x, profile.spotlight.anchor.y * outputSize.y};
-        const auto previousDirection = fanDirections.contains(monitor->m_name) ? fanDirections.at(monitor->m_name) : Vec2{0.0, 1.0};
-        const auto direction = resolveFanDirection(anchor, plan.cursorLocal, previousDirection);
-        if (std::hypot(anchor.x - plan.cursorLocal.x, anchor.y - plan.cursorLocal.y) > 1e-6)
-            fanDirections[monitor->m_name] = direction;
-        std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4U);
-        for (std::uint32_t y = 0; y < height; ++y) {
-            for (std::uint32_t x = 0; x < width; ++x) {
-                const auto point = Vec2{
-                    (static_cast<double>(x) + 0.5) * outputSize.x / width,
-                    (static_cast<double>(y) + 0.5) * outputSize.y / height,
-                };
-                const auto alpha = maskAlphaAt(
-                    SpotlightSample{
-                        .spotlight = profile.spotlight,
-                        .outputSize = outputSize,
-                        .cursor = plan.cursorLocal,
-                        .revealEnabled = revealEnabled,
-                        .fanDirection = direction,
-                    },
-                    point);
-                const auto offset = (static_cast<std::size_t>(y) * width + x) * 4U;
-                pixels[offset + 0] = static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.r, 0.0, 1.0) * 255.0);
-                pixels[offset + 1] = static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.g, 0.0, 1.0) * 255.0);
-                pixels[offset + 2] = static_cast<std::uint8_t>(std::clamp(profile.spotlight.maskColor.b, 0.0, 1.0) * 255.0);
-                pixels[offset + 3] = static_cast<std::uint8_t>(std::clamp(alpha, 0.0, 1.0) * 255.0);
-            }
-        }
-        auto texture = g_pHyprRenderer->createTexture(DRM_FORMAT_ABGR8888, pixels.data(), width * 4U, {static_cast<double>(width), static_cast<double>(height)}, false, false);
-        return wrapTexture(std::move(texture));
-    }
-
-    TextureHandle maskTexture(PHLMONITOR monitor, const RenderPlan& plan, const Profile& profile, const bool revealEnabled, const std::string& key) {
-        if (profile.spotlight.type == SpotlightType::None)
-            return {};
-        const auto cacheKey = monitor->m_name + ":" + key;
-        const auto outputSize = plan.logicalBounds.size;
-        const auto cursor = revealEnabled ? plan.cursorLocal : Vec2{};
-        const MaskState expected{profile.spotlight, outputSize, cursor, revealEnabled, monitor->m_transform};
-        auto& mask = maskTextures[cacheKey];
-        const auto state = maskStates.find(cacheKey);
-        if (!mask || state == maskStates.end() || state->second.spotlight != expected.spotlight || state->second.outputSize != expected.outputSize ||
-            state->second.cursor != expected.cursor || state->second.revealEnabled != expected.revealEnabled || state->second.transform != expected.transform) {
-            mask = createMaskTexture(monitor, plan, profile, revealEnabled);
-            maskStates.insert_or_assign(cacheKey, expected);
-        }
-        return mask;
-    }
-
     TextureHandle wallpaperTexture(const std::vector<std::filesystem::path>& candidates, std::filesystem::path* selectedPath = nullptr) {
         for (const auto& candidate : candidates) {
             const auto snapshot = cache.snapshot(candidate);
@@ -680,6 +635,12 @@ struct Adapter::Impl {
                 ++iterator;
         }
         for (auto& request : cache.takeUploads(1)) {
+            GLint limit = 0;
+            glGetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
+            if (limit <= 0 || request.image.width > static_cast<std::uint32_t>(limit) || request.image.height > static_cast<std::uint32_t>(limit)) {
+                (void)cache.failUpload(request, "wallpaper dimensions exceed the OpenGL texture size limit");
+                continue;
+            }
             const auto texture = g_pHyprRenderer->createTexture(
                 DRM_FORMAT_ABGR8888,
                 request.image.rgba.data(),
@@ -691,140 +652,69 @@ struct Adapter::Impl {
                 (void)cache.failUpload(request, "Hyprland rejected the wallpaper texture upload");
                 continue;
             }
+            texture->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
             const auto bytes = static_cast<std::size_t>(request.image.stride) * static_cast<std::size_t>(request.image.height);
             if (cache.completeUpload(request, wrapTexture(texture), bytes) && request.previousTexture)
-                replacementFades.insert_or_assign(request.path, ReplacementFade{request.previousTexture, now});
+                replacementFades.insert_or_assign(request.path, ReplacementFade{now, nextReplacementId++});
         }
         if (cache.hasPendingUploads())
             damageManagedOutputs();
     }
 
-    CRegion transitionClip(const Transition& transition, const double progress, const Vec2 origin, const Vec2 logicalSize, const float scale) {
-        CRegion region;
-        const auto eased = easeProgress(progress, transition.easing);
-        const auto addLogicalBox = [&region, scale](const double x, const double y, const double width, const double height) {
-            if (width > 0.0 && height > 0.0)
-                region.add(CBox{x * scale, y * scale, width * scale, height * scale});
-        };
-        if (eased <= 0.0)
-            return region;
-        if (eased >= 1.0) {
-            addLogicalBox(0.0, 0.0, logicalSize.x, logicalSize.y);
-            return region;
-        }
-        if (transition.type == TransitionType::Wipe) {
-            const auto fromRight = origin.x > logicalSize.x * 0.5;
-            const auto edge = fromRight ? logicalSize.x * (1.0 - eased) : logicalSize.x * eased;
-            addLogicalBox(fromRight ? edge : 0.0, 0.0, fromRight ? logicalSize.x - edge : edge, logicalSize.y);
-            return region;
-        }
-        if (transition.type == TransitionType::Outer) {
-            const auto left = origin.x * eased;
-            const auto right = origin.x + (logicalSize.x - origin.x) * (1.0 - eased);
-            const auto top = origin.y * eased;
-            const auto bottom = origin.y + (logicalSize.y - origin.y) * (1.0 - eased);
-            addLogicalBox(0.0, 0.0, logicalSize.x, top);
-            addLogicalBox(0.0, bottom, logicalSize.x, logicalSize.y - bottom);
-            addLogicalBox(0.0, top, left, bottom - top);
-            addLogicalBox(right, top, logicalSize.x - right, bottom - top);
-            return region;
-        }
-
-        constexpr int GRID = 48;
-        for (int y = 0; y < GRID; ++y) {
-            for (int x = 0; x < GRID; ++x) {
-                const Vec2 point{
-                    (static_cast<double>(x) + 0.5) * logicalSize.x / GRID,
-                    (static_cast<double>(y) + 0.5) * logicalSize.y / GRID,
-                };
-                if (transitionReveal(transition, progress, point, {logicalSize.x, logicalSize.y}, origin) < 0.5)
-                    continue;
-                region.add(CBox{
-                    (point.x - logicalSize.x / GRID * 0.5) * scale,
-                    (point.y - logicalSize.y / GRID * 0.5) * scale,
-                    logicalSize.x / GRID * scale + 1.0,
-                    logicalSize.y / GRID * scale + 1.0,
-                });
+    std::vector<UP<IPassElement>> drawGpuWallpaper(const std::string& output, const gpu::Input& input) {
+        std::vector<UP<IPassElement>> result;
+        SP<Render::ITexture> texture;
+        try {
+            if (g_pHyprRenderer->type() != Render::IHyprRenderer::RT_GL)
+                throw std::runtime_error("Luxaxis requires Hyprland's OpenGL renderer");
+            auto& renderer = gpuRenderers[output];
+            if (!renderer)
+                renderer = std::make_unique<gpu::Renderer>();
+            const auto rendered = renderer->render(input);
+            auto& wrapper = gpuTextures[output];
+            if (!wrapper || wrapper->m_texID != rendered->id())
+                wrapper = makeShared<GpuTexture>(rendered);
+            texture = wrapper;
+            gpuErrors.erase(output);
+        } catch (const std::exception& error) {
+            if (gpuErrors[output] != error.what()) {
+                Log::logger->log(Log::ERR, "Luxaxis GPU {}: {}", output, error.what());
+                gpuErrors[output] = error.what();
             }
+            if (const auto previous = gpuTextures.find(output); previous != gpuTextures.end())
+                texture = previous->second;
         }
-        return region;
-    }
-
-    void drawWallpaperTexture(PHLMONITOR monitor, const SP<Render::ITexture>& texture, const Profile& profile, const float alpha = 1.F, const CRegion& clip = {}) {
-        if (!texture || texture->m_size.x <= 0.0 || texture->m_size.y <= 0.0 || monitor->m_transformedSize.x <= 0.0 || monitor->m_transformedSize.y <= 0.0)
-            return;
-        const auto outputSize = monitor->m_transformedSize;
-        const auto imageSize = Vector2D{texture->m_size.x, texture->m_size.y};
-        const auto fit = profile.fit;
-        const double scaleX = outputSize.x / imageSize.x;
-        const double scaleY = outputSize.y / imageSize.y;
-        const double scale = fit == FitMode::Stretch ? 1.0 : (fit == FitMode::Contain ? std::min(scaleX, scaleY) : std::max(scaleX, scaleY));
-        const auto imageBox = fit == FitMode::Stretch ? outputSize : Vector2D{imageSize.x * scale, imageSize.y * scale};
-        const auto excess = outputSize - imageBox;
-        const auto origin = Vector2D{excess.x * profile.position.x, excess.y * profile.position.y};
-        CTexPassElement::SRenderData data{};
-        data.tex = texture;
-        data.box = {origin, imageBox};
-        data.a = alpha;
-        data.clipRegion = clip;
-        g_pHyprRenderer->addPassElement(makeUnique<CTexPassElement>(std::move(data)));
-    }
-
-    void drawInterruptedWallpaperPrefix(PHLMONITOR monitor, const RenderPlan& plan, const SP<Render::ITexture>& oldTexture) {
-        if (!plan.interruptedSourceProfile || !plan.previousProfile)
-            return;
-        const auto sourceTexture = unwrapTexture(wallpaperTexture({plan.interruptedSourceProfile->wallpaper}));
-        if (sourceTexture)
-            drawWallpaperTexture(monitor, sourceTexture, *plan.interruptedSourceProfile);
-        if (!oldTexture)
-            return;
-        if (plan.interruptedTransition.type == TransitionType::Fade) {
-            drawWallpaperTexture(monitor, oldTexture, *plan.previousProfile, static_cast<float>(plan.interruptedProgress));
+        if (texture) {
+            CTexPassElement::SRenderData data{};
+            data.tex = texture;
+            data.box = {0, 0, input.pixelSize.x, input.pixelSize.y};
+            result.push_back(makeUnique<CTexPassElement>(std::move(data)));
         } else {
-            drawWallpaperTexture(
-                monitor,
-                oldTexture,
-                *plan.previousProfile,
-                1.F,
-                transitionClip(
-                    plan.interruptedTransition,
-                    plan.interruptedProgress,
-                    plan.interruptedOrigin,
-                    plan.logicalBounds.size,
-                    monitor->m_scale));
+            CRectPassElement::SRectData data{};
+            data.box = {0, 0, input.pixelSize.x, input.pixelSize.y};
+            data.color = hyprColor(input.fallbackColor);
+            result.push_back(makeUnique<CRectPassElement>(std::move(data)));
         }
+        return result;
     }
 
     void renderWallpaper() {
         const auto now = std::chrono::steady_clock::now();
-        const auto frameDelta = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFrame);
-        lastFrame = now;
-        engine.advance(frameDelta);
+        engine.advanceTo(engineTime());
         applyPendingConfig();
         auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
         if (!monitor)
             return;
         uploadPendingTextures();
         syncOutput(monitor);
-        const auto plan = engine.planFor(monitor->m_name);
+        auto plan = engine.planFor(monitor->m_name);
         if (!plan)
             return;
 
-        for (auto iterator = replacementFades.begin(); iterator != replacementFades.end();) {
-            if (now - iterator->second.started >= 120ms)
-                iterator = replacementFades.erase(iterator);
-            else
-                ++iterator;
-        }
-
         std::set<std::filesystem::path> pinned;
-        const auto plans = engine.plans();
-        for (const auto& other : plans)
+        for (const auto& other : engine.plans()) {
             for (const auto& candidate : other.wallpaperCandidates)
                 pinned.insert(candidate);
-        for (const auto& other : plans) {
-            if (other.previousProfile)
-                pinned.insert(other.previousProfile->wallpaper);
         }
         for (const auto& [unused, last] : lastWallpaperTextures) {
             (void)unused;
@@ -832,127 +722,63 @@ struct Adapter::Impl {
         }
         cache.setPinned(pinned);
 
-        // During a transition, only the destination image may replace the
-        // source. A default-profile fallback is allowed once the transition
-        // has finished, but must not make a missing destination flash early.
-        TextureHandle wallpaper;
-        std::filesystem::path selectedWallpaperPath;
-        const auto destinationSnapshot = cache.snapshot(plan->profile.wallpaper);
-        if (plan->transitioning) {
-            wallpaper = wallpaperTexture({plan->profile.wallpaper}, &selectedWallpaperPath);
-        } else {
-            wallpaper = wallpaperTexture({plan->profile.wallpaper}, &selectedWallpaperPath);
-            if (!wallpaper && destinationSnapshot.status == ImageStatus::Failed)
-                wallpaper = wallpaperTexture(
-                    plan->wallpaperCandidates.size() > 1 ? std::vector{plan->wallpaperCandidates[1]} : std::vector<std::filesystem::path>{},
-                    &selectedWallpaperPath);
+        std::filesystem::path selectedPath;
+        auto wallpaper = wallpaperTexture({plan->profile.wallpaper}, &selectedPath);
+        const auto destination = cache.snapshot(plan->profile.wallpaper);
+        Profile selectedProfile = config.profiles.at(plan->profileName);
+        if (!wallpaper && destination.status == ImageStatus::Failed) {
+            engine.cancelTransition(monitor->m_name);
+            plan.emplace(*engine.planFor(monitor->m_name));
+            selectedProfile = config.profiles.at(config.defaultProfile);
+            wallpaper = wallpaperTexture({selectedProfile.wallpaper}, &selectedPath);
         }
+        const bool ready = wallpaper || (destination.status == ImageStatus::Failed &&
+            cache.snapshot(selectedProfile.wallpaper).status == ImageStatus::Failed);
+        engine.setTransitionReady(monitor->m_name, ready);
+        if (ready && !wallpaper)
+            selectedProfile.spotlight = {};
 
-        const CBox outputBox{{0.0, 0.0}, monitor->m_transformedSize};
-        const auto currentTexture = unwrapTexture(wallpaper);
-        std::optional<float> replacementProgress;
-        SP<Render::ITexture> replacementTexture;
-        if (!plan->transitioning && !selectedWallpaperPath.empty()) {
-            if (const auto replacement = replacementFades.find(selectedWallpaperPath); replacement != replacementFades.end()) {
-                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - replacement->second.started);
-                const auto progress = std::clamp(static_cast<float>(elapsed.count()) / 120.F, 0.F, 1.F);
-                if (progress < 1.F) {
-                    replacementProgress = progress;
-                    replacementTexture = unwrapTexture(replacement->second.previousTexture);
-                } else {
-                    replacementFades.erase(replacement);
-                }
+        const auto texture = unwrapTexture(wallpaper);
+        gpu::Input input{
+            .destination = texture ? gpu::Image{texture->m_texID, {texture->m_size.x, texture->m_size.y},
+                                               selectedProfile.fit, selectedProfile.position, wallpaper} : gpu::Image{},
+            .spotlight = selectedProfile.spotlight,
+            .fallbackColor = plan->fallbackColor,
+            .logicalSize = plan->logicalBounds.size,
+            .pixelSize = {monitor->m_transformedSize.x, monitor->m_transformedSize.y},
+            .cursor = plan->cursorLocal,
+            .transitionOrigin = plan->transitionOrigin,
+            .transition = plan->transition,
+            .progress = plan->transitionProgress,
+            .transitionId = plan->transitionId,
+            .transitioning = plan->transitioning,
+            .revealEnabled = engine.spotlightEnabled() && engine.activeOutput() == monitor->m_name,
+            .spotlightEnabled = engine.spotlightEnabled(),
+            .destinationReady = ready,
+        };
+        for (auto iterator = replacementFades.begin(); iterator != replacementFades.end();) {
+            if (now - iterator->second.started >= 120ms)
+                iterator = replacementFades.erase(iterator);
+            else
+                ++iterator;
+        }
+        if (!input.transitioning && !selectedPath.empty()) {
+            if (const auto replacement = replacementFades.find(selectedPath); replacement != replacementFades.end()) {
+                input.transitioning = true;
+                input.transition = {.type = TransitionType::Fade, .durationMs = 120, .easing = "ease-out",
+                                    .origin = TransitionOrigin::Center, .point = {0.5, 0.5}, .randomAllowlist = {}};
+                input.progress = std::chrono::duration<double, std::milli>(now - replacement->second.started).count() / 120.0;
+                input.transitionId = replacement->second.id;
             }
         }
-        CRectPassElement::SRectData baseData{};
-        baseData.box = outputBox;
-        baseData.color = hyprColor(plan->fallbackColor);
-        g_pHyprRenderer->addPassElement(makeUnique<CRectPassElement>(std::move(baseData)));
-        if (plan->transitioning && plan->previousProfile) {
-            const auto oldTexture = unwrapTexture(wallpaperTexture({plan->previousProfile->wallpaper}));
-            const auto sameWallpaper = plan->previousProfile->wallpaper == plan->profile.wallpaper;
-            if (sameWallpaper) {
-                if (plan->interruptedSourceProfile)
-                    drawInterruptedWallpaperPrefix(monitor, *plan, oldTexture);
-                else if (currentTexture) {
-                    drawWallpaperTexture(monitor, currentTexture, plan->profile);
-                } else if (oldTexture) {
-                    drawWallpaperTexture(monitor, oldTexture, *plan->previousProfile);
-                }
-            } else {
-                if (plan->interruptedSourceProfile) {
-                    drawInterruptedWallpaperPrefix(monitor, *plan, oldTexture);
-                } else if (oldTexture) {
-                    drawWallpaperTexture(monitor, oldTexture, *plan->previousProfile);
-                }
-                if (currentTexture) {
-                    if (plan->transition.type == TransitionType::Fade)
-                        drawWallpaperTexture(monitor, currentTexture, plan->profile, static_cast<float>(plan->transitionProgress));
-                    else
-                        drawWallpaperTexture(
-                            monitor,
-                            currentTexture,
-                            plan->profile,
-                            1.F,
-                            transitionClip(plan->transition, plan->transitionProgress, plan->transitionOrigin, plan->logicalBounds.size, monitor->m_scale));
-                }
-            }
-            if (!currentTexture && oldTexture)
-                lastWallpaperTextures[monitor->m_name] = LastWallpaper{plan->previousProfile->wallpaper, *plan->previousProfile};
-        } else if (currentTexture) {
-            lastWallpaperTextures[monitor->m_name] = LastWallpaper{selectedWallpaperPath, plan->profile};
-            if (replacementProgress && replacementTexture) {
-                drawWallpaperTexture(monitor, replacementTexture, plan->profile, 1.F - *replacementProgress);
-                drawWallpaperTexture(monitor, currentTexture, plan->profile, *replacementProgress);
-            } else {
-                drawWallpaperTexture(monitor, currentTexture, plan->profile);
-            }
-        } else if (destinationSnapshot.status != ImageStatus::Failed) {
-            const auto previous = lastWallpaperTextures.find(monitor->m_name);
-            if (previous != lastWallpaperTextures.end()) {
-                if (const auto texture = unwrapTexture(wallpaperTexture({previous->second.path})))
-                    drawWallpaperTexture(monitor, texture, previous->second.profile);
-            }
-        }
+        if (wallpaper)
+            lastWallpaperTextures[monitor->m_name] = LastWallpaper{selectedPath, selectedProfile};
 
-        if (plan->maskEnabled) {
-            auto drawMask = [&](const Profile& profile, const float alpha, const std::string& key) {
-                if (auto texture = unwrapTexture(maskTexture(monitor, *plan, profile, plan->revealEnabled, key))) {
-                CTexPassElement::SRenderData data{};
-                data.tex = std::move(texture);
-                data.box = outputBox;
-                data.a = alpha;
-                g_pHyprRenderer->addPassElement(makeUnique<CTexPassElement>(std::move(data)));
-                }
-            };
-            if (plan->transitioning && plan->previousProfile) {
-                const auto& destinationSpotlight = plan->profile.spotlight;
-                const auto& previousSpotlight = plan->previousProfile->spotlight;
-                if (plan->interruptedSourceProfile) {
-                    const auto& interruptedSpotlight = plan->interruptedSourceProfile->spotlight;
-                    const auto compositeWeight = static_cast<float>(1.0 - plan->transitionProgress);
-                    if (interruptedSpotlight.type != SpotlightType::None && interruptedSpotlight.type == previousSpotlight.type) {
-                        auto interpolated = *plan->previousProfile;
-                        interpolated.spotlight = interpolateSpotlight(interruptedSpotlight, previousSpotlight, plan->interruptedProgress);
-                        drawMask(interpolated, compositeWeight, "interrupted-interpolated");
-                    } else {
-                        drawMask(*plan->interruptedSourceProfile, compositeWeight * static_cast<float>(1.0 - plan->interruptedProgress), "interrupted-old");
-                        drawMask(*plan->previousProfile, compositeWeight * static_cast<float>(plan->interruptedProgress), "interrupted-new");
-                    }
-                    drawMask(plan->profile, static_cast<float>(plan->transitionProgress), "new");
-                } else if (previousSpotlight.type != SpotlightType::None && previousSpotlight.type == destinationSpotlight.type) {
-                    auto interpolated = plan->profile;
-                    interpolated.spotlight = interpolateSpotlight(previousSpotlight, destinationSpotlight, plan->transitionProgress);
-                    drawMask(interpolated, 1.F, "interpolated");
-                } else {
-                    drawMask(*plan->previousProfile, static_cast<float>(1.0 - plan->transitionProgress), "old");
-                    drawMask(plan->profile, static_cast<float>(plan->transitionProgress), "new");
-                }
-            } else {
-                drawMask(plan->profile, 1.F, "current");
-            }
-        }
-        if ((plan->transitioning || replacementProgress) && !Fullscreen::controller()->hasFullscreen(monitor))
+        // GL runs when this pass executes, after culling and at the wallpaper's
+        // actual position in the render pass, not during pass construction.
+        g_pHyprRenderer->addPassElement(makeUnique<WallpaperPass>(
+            plan->logicalBounds.size, [this, output = monitor->m_name, input] { return drawGpuWallpaper(output, input); }));
+        if (input.transitioning && ready && !wallpaperOccluded(monitor))
             g_pHyprRenderer->damageMonitor(monitor);
     }
 };

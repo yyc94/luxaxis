@@ -1,0 +1,25 @@
+[plugins]
+enabled = ["yyc94/luxaxis"]
+auto_update = "none"
+
+[[plugins.source]]
+kind = "path"
+name = "test"
+location = "/__luxaxis_unused_plugin_source__"
+
+[bar.default]
+start = ["luxaxis"]
+center = []
+end = []
+
+[widget.luxaxis]
+type = "yyc94/luxaxis:workspaces"
+
+[wallpaper]
+enabled = false
+
+[lockscreen]
+enabled = false
+
+[shell]
+setup_wizard_enabled = false

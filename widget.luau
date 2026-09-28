@@ -101,7 +101,15 @@ local function workspaceNode(workspace, output, interactive)
     minWidth = style.minWidth,
     minHeight = style.minHeight,
     opacity = interactive and style.opacity or style.opacity * 0.55,
-    tooltip = tooltip,
+    onHover = function(entered)
+      if entered == "true" then
+        barWidget.setTooltip(tooltip)
+      elseif type(snapshot.error) == "string" and snapshot.error ~= "" then
+        barWidget.setTooltip(snapshot.error)
+      else
+        barWidget.clearTooltip()
+      end
+    end,
     onClick = interactive and not active and function()
       request({ action = "switch", key = key, output = output })
     end or nil,

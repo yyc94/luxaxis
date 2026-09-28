@@ -56,6 +56,8 @@ double transitionReveal(const Transition& transition, const double progress, con
             return point.x <= left || point.x >= right || point.y <= top || point.y >= bottom ? 1.0 : 0.0;
         }
         case TransitionType::Clock: {
+            if (distance(point, origin) <= 0.0001)
+                return 1.0;
             const auto angle = std::atan2(point.y - origin.y, point.x - origin.x) + PI * 0.5;
             const auto normalized = std::fmod(angle + 2.0 * PI, 2.0 * PI) / (2.0 * PI);
             return normalized <= p ? 1.0 : 0.0;

@@ -1,0 +1,5 @@
+[
+  {"address":"1", "type":"normal", "id":1, "name":"1", "monitor":"HEADLESS-1"},
+  {"address":"2", "type":"normal", "id":2, "name":"2", "monitor":"HEADLESS-1"},
+  {"address":"3", "type":"normal", "id":3, "name":"3", "monitor":"HEADLESS-1"}
+]

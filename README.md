@@ -21,7 +21,7 @@ Luxaxis 提供两个相互独立的插件：
 
 ### 依赖
 
-- Noctalia v5，且支持 `plugin_api = 32`。
+- Noctalia v5。已验证发行版 `5.1.0-1`（支持 API `3..30`）；插件需要 `plugin_api = 28`。
 - Hyprland 和 `hyprctl`。
 - `socat`，用于接收 Hyprland workspace 事件并即时刷新状态。
 
@@ -44,6 +44,10 @@ noctalia msg plugins enable yyc94/luxaxis
 
 如果 Noctalia 已经在运行，重新加载配置或重启 Noctalia，使插件清单生效。
 
+更新旧版 Luxaxis 时，重新执行上面的复制命令，然后运行
+`noctalia msg config-reload`。旧版清单中的 `plugin_api = 32` 会被 Noctalia
+`5.1.0` 拒绝，必须一并更新 `plugin.toml` 和脚本。
+
 ### 添加到 bar
 
 可以在 Noctalia 的 Add widget 界面添加 **Luxaxis** workspace widget，也可以在 bar 配置中手动添加：
@@ -62,6 +66,9 @@ widget 的行为如下：
 ### Noctalia 设置
 
 在 Luxaxis 的 **Workspace styles** 面板中可以编辑基础样式、workspace 状态样式和单个 workspace 样式。可调整的内容包括标签来源、图标、文字、颜色、边框、圆角、间距和透明度。
+
+样式面板是独立浮动面板，点击外部不会关闭。使用右上角关闭按钮、Escape，
+或 `noctalia msg panel-close yyc94/luxaxis:workspace-styles` 关闭。
 
 插件设置中还提供两个选项：
 
@@ -119,6 +126,7 @@ noctalia msg plugins disable yyc94/luxaxis
 - Hyprland `0.56.2`，以及与当前运行版本匹配的 Hyprland 开发文件和 `pkg-config` metadata。
 - CMake `3.25` 或更新版本。
 - 支持 C++23 的编译器。
+- Hyprland 的 OpenGL 渲染后端，以及 GLES 3 运行库和 `glesv2` 的 `pkg-config` metadata。
 - `pkg-config`、线程库和图像解码依赖。CMake 会在系统没有 `tomlplusplus` 时尝试下载对应版本。
 
 ### 构建和安装
@@ -141,6 +149,9 @@ install -Dm755 /tmp/luxaxis-build/luxaxis.so \
 ```
 
 如果 CMake 报告找不到 `hyprland=0.56.2`，说明当前系统没有提供匹配运行版本的开发文件；不要使用其他 Hyprland 版本的头文件或库混合构建。
+
+修复旧版加载崩溃后，需要重新构建并替换 `luxaxis.so`。旧二进制的隐藏符号
+设置会产生私有的空 compositor 指针，首次加载即崩溃；仅更新 TOML 无法修复。
 
 ### 创建配置
 
@@ -189,8 +200,8 @@ position = [0.5, 0.5]
 type = "circle"
 mask_color = "#000000"
 mask_opacity = 0.55
-radius = "18%"
-softness = "4%"
+radius = "60px"
+softness = "8px"
 
 [profiles.beam]
 wallpaper = "~/Pictures/wallpapers/beam.jpg"
@@ -203,7 +214,7 @@ mask_opacity = 0.68
 anchor = [0.5, 0.08]
 radius = "18%"
 aspect_ratio = 0.55
-softness = "4%"
+softness = "8px"
 beam_start_reveal = 0.35
 
 [workspaces]
@@ -271,6 +282,8 @@ plugin = /home/your-user/.local/lib/hyprland/luxaxis.so
 - `fan`：以鼠标为椭圆中心、以 `anchor` 为锚点的扇形/束状亮区。`anchor` 是输出内的归一化坐标，`radius` 控制鼠标周围椭圆半径，`aspect_ratio` 控制椭圆纵横比，`beam_start_reveal` 控制从锚点开始的亮度揭示程度。
 
 长度可以写成逻辑像素（例如 `"240px"`）或输出短边的百分比（例如 `"18%"`）。颜色格式为 `#RRGGBB`，透明度单独由 `mask_opacity` 控制。
+
+`softness` 是亮区内侧的渐变宽度；值越大，边缘看起来越像一圈模糊光。建议先用 `"8px"`，需要更清晰时继续减小；已有配置不会自动改动。
 
 Spotlight 只作用于壁纸，不会使窗口、bar、桌面小组件或鼠标指针变暗。非 active output 保留当前 profile 的遮罩，但不显示亮区。
 

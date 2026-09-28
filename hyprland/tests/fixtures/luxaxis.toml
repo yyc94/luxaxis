@@ -1,0 +1,5 @@
+version = 1
+default_profile = "default"
+
+[profiles.default]
+wallpaper = "/__luxaxis_test_wallpaper__.png"
