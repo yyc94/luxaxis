@@ -8,6 +8,7 @@ Luxaxis 提供两个相互独立的插件：
 两者可以单独使用，也可以同时使用。Noctalia 插件不会管理壁纸，Hyprland 插件也不会修改 Hyprland 的 workspace 配置。
 
 本文是使用和部署说明。命令默认从本仓库根目录执行。
+本次兼容性修复、GPU 渲染和旧安装的更新要求见 [变更记录](CHANGELOG.md)。
 
 ## 注意事项
 
@@ -128,8 +129,29 @@ noctalia msg plugins disable yyc94/luxaxis
 - 支持 C++23 的编译器。
 - Hyprland 的 OpenGL 渲染后端，以及 GLES 3 运行库和 `glesv2` 的 `pkg-config` metadata。
 - `pkg-config`、线程库和图像解码依赖。CMake 会在系统没有 `tomlplusplus` 时尝试下载对应版本。
+- 使用 hyprpm 安装时，需要系统提供 `hyprpm` 命令；手动安装不需要。
 
-### 构建和安装
+### 通过 hyprpm 安装
+
+在运行 Hyprland 的目标机器上，先准备与当前 Hyprland 匹配的 hyprpm 头文件，再添加并启用本仓库的 Hyprland 插件：
+
+```bash
+hyprpm update
+hyprpm add https://github.com/yyc94/luxaxis.git
+hyprpm enable luxaxis
+```
+
+hyprpm 会根据仓库根目录的 `hyprpm.toml` 构建 `luxaxis.so`，不会安装 Noctalia 插件。为确保以后启动 Hyprland 时重新加载已启用的插件，在 `hyprland.conf` 中加入（已有相同命令时不要重复加入）：
+
+```ini
+exec-once = hyprpm reload
+```
+
+不要同时保留下面手动安装方式的 `plugin = .../luxaxis.so`，否则会尝试加载两份插件。当前源码仅支持 Hyprland `0.56.2`；即使通过 hyprpm 安装，更新到其他 Hyprland 版本后也必须等待插件适配，不能绕过版本检查。
+
+以后更新本插件时运行 `hyprpm update`；更新 Hyprland 后也先确认新版本已受支持，再运行该命令重新构建插件。
+
+### 手动构建和安装
 
 在仓库根目录执行：
 
@@ -227,7 +249,7 @@ beam_start_reveal = 0.35
 
 ### 启用插件
 
-当前会话中可以先手动加载，确认没有错误：
+本节仅适用于手动安装；通过 hyprpm 安装时使用上面的 `hyprpm enable luxaxis`，不要重复加载。当前会话中可以先手动加载，确认没有错误：
 
 ```bash
 hyprctl plugin load "$HOME/.local/lib/hyprland/luxaxis.so"
@@ -337,7 +359,7 @@ hyprctl luxaxis:spotlight toggle
 
 ### 移除
 
-从 `hyprland.conf` 删除 `plugin = .../luxaxis.so`，然后重启 Hyprland。之后可以删除 `~/.local/lib/hyprland/luxaxis.so` 和 `luxaxis.toml`；插件不会自动删除或修改这些文件。
+hyprpm 安装的插件先运行 `hyprpm disable luxaxis`，再运行 `hyprpm remove luxaxis`。手动安装的插件则从 `hyprland.conf` 删除 `plugin = .../luxaxis.so`，然后重启 Hyprland；之后可以删除 `~/.local/lib/hyprland/luxaxis.so`。两种方式都不会自动删除 `luxaxis.toml`。
 
 ## 同时使用两个插件
 

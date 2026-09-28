@@ -1,0 +1,12 @@
+[repository]
+name = "luxaxis"
+authors = ["yyc94"]
+
+[luxaxis]
+description = "Workspace wallpapers, Spotlight, and transitions for Hyprland"
+authors = ["yyc94"]
+output = "build-hyprpm/luxaxis.so"
+build = [
+  "cmake -S hyprland -B build-hyprpm -DCMAKE_BUILD_TYPE=Release -DLUXAXIS_BUILD_PLUGIN=ON -DLUXAXIS_BUILD_TESTS=OFF -DLUXAXIS_BUILD_GPU_TESTS=OFF",
+  "cmake --build build-hyprpm --target luxaxis --parallel 4",
+]

@@ -75,7 +75,7 @@ ctest --test-dir /tmp/luxaxis-build --output-on-failure
 dbus-run-session bash tests/noctalia_smoke.sh .
 ```
 
-Results: 10 model tests, 14 runtime tests, and 8 CTest cases passed. The
+Results: 10 model tests, 14 runtime tests, and 9 CTest cases passed. The
 runtime mock intentionally omits `getColor()`. It covers the RGB picker
 contract, released hover tooltips, native and inline choices, and lists over
 the native menu limit.
@@ -105,6 +105,20 @@ The virtual-pointer fixture is a reduced copy of the MIT-licensed
 the XML. Source: [wlrctl protocol](https://git.sr.ht/~brocellous/wlrctl/tree/c6bc60820bb8786c7509e651bcae9393a738f180/item/protocol/wlr-virtual-pointer-unstable-v1.xml).
 The test helper uses generated Wayland bindings and keeps the device alive
 so the host binds `wl_pointer` before receiving clicks.
+
+## Hyprpm Manifest
+
+The root `hyprpm.toml` follows Hyprland 0.56.2's `CManifest` schema: one
+`luxaxis` plugin with an output path and two build steps. The new manifest test
+parses it with toml++ and checks that those steps target the declared CMake
+output. In an isolated local Git copy, the same configure and build commands
+produced `build-hyprpm/luxaxis.so`, verified as an ELF shared object against
+the packaged Hyprland 0.56.2 headers.
+
+The test container does not have the `hyprpm` executable or a running Hyprland
+desktop. Actual `hyprpm add`, `enable`, restart/reload, and upgrade behavior
+remain to be verified on a target desktop. The CMake package check intentionally
+rejects Hyprland versions other than 0.56.2.
 
 ## GPU Renderer
 

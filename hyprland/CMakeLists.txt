@@ -65,6 +65,12 @@ if(LUXAXIS_BUILD_PLUGIN)
 endif()
 
 if(BUILD_TESTING AND LUXAXIS_BUILD_TESTS)
+  add_executable(luxaxis_hyprpm_manifest_tests tests/hyprpm_manifest_test.cpp)
+  target_link_libraries(luxaxis_hyprpm_manifest_tests PRIVATE tomlplusplus::tomlplusplus)
+  target_compile_options(luxaxis_hyprpm_manifest_tests PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME luxaxis_hyprpm_manifest_tests
+    COMMAND luxaxis_hyprpm_manifest_tests ${CMAKE_CURRENT_SOURCE_DIR}/../hyprpm.toml)
+
   foreach(test_name IN ITEMS config engine image_cache spotlight transition)
     add_executable(luxaxis_${test_name}_tests tests/${test_name}_test.cpp)
     target_link_libraries(luxaxis_${test_name}_tests PRIVATE luxaxis_core)
