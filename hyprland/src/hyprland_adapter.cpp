@@ -35,7 +35,9 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
@@ -228,6 +230,17 @@ Config fallbackConfig() {
     return config;
 }
 
+std::string_view imageStatusName(const ImageStatus status) {
+    switch (status) {
+        case ImageStatus::Missing: return "missing";
+        case ImageStatus::Loading: return "loading";
+        case ImageStatus::AwaitingUpload: return "awaiting-upload";
+        case ImageStatus::Ready: return "ready";
+        case ImageStatus::Failed: return "failed";
+    }
+    return "unknown";
+}
+
 std::int64_t normalWorkspace(PHLWORKSPACE workspace) {
     if (!workspace || workspace->m_isSpecialWorkspace || workspace->m_id <= 0)
         return 0;
@@ -396,6 +409,7 @@ struct Adapter::Impl {
     WallpaperWatcher wallpaperWatcher;
     std::mutex errorMutex;
     std::optional<Error> lastConfigError;
+    bool usingFallbackConfig = false;
     std::unordered_map<std::string, std::unique_ptr<gpu::Renderer>> gpuRenderers;
     std::unordered_map<std::string, SP<Render::ITexture>> gpuTextures;
     std::unordered_map<std::string, std::string> gpuErrors;
@@ -410,6 +424,7 @@ struct Adapter::Impl {
     };
     std::unordered_map<std::filesystem::path, ReplacementFade> replacementFades;
     std::unordered_set<std::filesystem::path> reportedImageErrors;
+    std::unordered_map<std::string, std::string> outputStates;
     CHyprSignalListener renderStage;
     CHyprSignalListener workspaceActive;
     CHyprSignalListener workspaceMove;
@@ -419,6 +434,7 @@ struct Adapter::Impl {
     CHyprSignalListener cursorMove;
     SP<SHyprCtlCommand> reloadCommand;
     SP<SHyprCtlCommand> spotlightCommand;
+    SP<SHyprCtlCommand> statusCommand;
     std::uint64_t nextReplacementId = 1ULL << 63U;
 
     Impl(HANDLE pluginHandle, std::filesystem::path source, std::filesystem::path homePath, Config initial)
@@ -464,6 +480,7 @@ struct Adapter::Impl {
                 gpuTextures.erase(monitor->m_name);
                 gpuRenderers.erase(monitor->m_name);
                 gpuErrors.erase(monitor->m_name);
+                outputStates.erase(monitor->m_name);
             }
             damageManagedOutputs();
         });
@@ -592,12 +609,17 @@ struct Adapter::Impl {
                 gpuRenderers.erase(excluded);
                 gpuErrors.erase(excluded);
                 lastWallpaperTextures.erase(excluded);
+                outputStates.erase(excluded);
                 for (const auto& monitor : State::monitorState()->monitors())
                     if (monitor && monitor->m_name == excluded)
                         g_pHyprRenderer->damageMonitor(monitor);
             }
             const auto paths = wallpaperPaths(config);
             std::erase_if(reportedImageErrors, [&paths](const auto& path) { return !paths.contains(path); });
+            usingFallbackConfig = false;
+            lastConfigError.reset();
+            Log::logger->log(Log::DEBUG, "Luxaxis config loaded: {} ({} profiles, {} workspace mappings)",
+                             configPath.string(), config.profiles.size(), config.workspaces.size());
             damageManagedOutputs();
         }
         if (error) {
@@ -607,12 +629,23 @@ struct Adapter::Impl {
             lastConfigError = std::move(error);
         }
     }
+    void reportImageError(const std::filesystem::path& path, const std::string& message) {
+        if (reportedImageErrors.insert(path).second)
+            Log::logger->log(Log::ERR, "Luxaxis wallpaper {}: {}", path.string(), message);
+    }
+
+    void reportOutputState(const std::string& output, std::string state, const bool failure) {
+        if (const auto previous = outputStates.find(output); previous != outputStates.end() && previous->second == state)
+            return;
+        outputStates.insert_or_assign(output, state);
+        Log::logger->log(failure ? Log::ERR : Log::DEBUG, "Luxaxis output {}: {}", output, state);
+    }
+
     TextureHandle wallpaperTexture(const std::vector<std::filesystem::path>& candidates, std::filesystem::path* selectedPath = nullptr) {
         for (const auto& candidate : candidates) {
             const auto snapshot = cache.snapshot(candidate);
             if (!snapshot.error.empty()) {
-                if (reportedImageErrors.insert(candidate).second)
-                    Log::logger->log(Log::ERR, "Luxaxis wallpaper {}: {}", candidate.string(), snapshot.error);
+                reportImageError(candidate, snapshot.error);
             } else {
                 reportedImageErrors.erase(candidate);
             }
@@ -638,7 +671,9 @@ struct Adapter::Impl {
             GLint limit = 0;
             glGetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
             if (limit <= 0 || request.image.width > static_cast<std::uint32_t>(limit) || request.image.height > static_cast<std::uint32_t>(limit)) {
-                (void)cache.failUpload(request, "wallpaper dimensions exceed the OpenGL texture size limit");
+                const std::string message = "wallpaper dimensions exceed the OpenGL texture size limit";
+                if (cache.failUpload(request, message))
+                    reportImageError(request.path, message);
                 continue;
             }
             const auto texture = g_pHyprRenderer->createTexture(
@@ -649,13 +684,20 @@ struct Adapter::Impl {
                 false,
                 false);
             if (!texture) {
-                (void)cache.failUpload(request, "Hyprland rejected the wallpaper texture upload");
+                const std::string message = "Hyprland rejected the wallpaper texture upload";
+                if (cache.failUpload(request, message))
+                    reportImageError(request.path, message);
                 continue;
             }
             texture->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
             const auto bytes = static_cast<std::size_t>(request.image.stride) * static_cast<std::size_t>(request.image.height);
-            if (cache.completeUpload(request, wrapTexture(texture), bytes) && request.previousTexture)
-                replacementFades.insert_or_assign(request.path, ReplacementFade{now, nextReplacementId++});
+            if (cache.completeUpload(request, wrapTexture(texture), bytes)) {
+                reportedImageErrors.erase(request.path);
+                Log::logger->log(Log::DEBUG, "Luxaxis wallpaper ready: {} ({}x{})", request.path.string(),
+                                 request.image.width, request.image.height);
+                if (request.previousTexture)
+                    replacementFades.insert_or_assign(request.path, ReplacementFade{now, nextReplacementId++});
+            }
         }
         if (cache.hasPendingUploads())
             damageManagedOutputs();
@@ -672,10 +714,13 @@ struct Adapter::Impl {
                 renderer = std::make_unique<gpu::Renderer>();
             const auto rendered = renderer->render(input);
             auto& wrapper = gpuTextures[output];
+            const bool firstFrame = !wrapper;
             if (!wrapper || wrapper->m_texID != rendered->id())
                 wrapper = makeShared<GpuTexture>(rendered);
             texture = wrapper;
-            gpuErrors.erase(output);
+            const bool recovered = gpuErrors.erase(output) != 0;
+            if (firstFrame || recovered)
+                Log::logger->log(Log::DEBUG, "Luxaxis GPU output {}: rendering ready", output);
         } catch (const std::exception& error) {
             if (gpuErrors[output] != error.what()) {
                 Log::logger->log(Log::ERR, "Luxaxis GPU {}: {}", output, error.what());
@@ -738,6 +783,27 @@ struct Adapter::Impl {
         if (ready && !wallpaper)
             selectedProfile.spotlight = {};
 
+        if (wallpaper) {
+            reportOutputState(monitor->m_name,
+                "workspace " + (plan->workspace ? std::to_string(*plan->workspace) : std::string{"none"}) +
+                " profile " + plan->profileName + " wallpaper " + selectedPath.string() +
+                (selectedPath == plan->profile.wallpaper ? " ready" : " using default profile"), false);
+        } else {
+            const auto selected = cache.snapshot(selectedProfile.wallpaper);
+            const bool failed = destination.status == ImageStatus::Failed && selected.status == ImageStatus::Failed;
+            const bool retainingPrevious = !ready && lastWallpaperTextures.contains(monitor->m_name) &&
+                gpuTextures.contains(monitor->m_name);
+            reportOutputState(monitor->m_name,
+                "workspace " + (plan->workspace ? std::to_string(*plan->workspace) : std::string{"none"}) +
+                " profile " + plan->profileName +
+                (retainingPrevious ? " retaining previous wallpaper; wallpaper " : " fallback color; wallpaper ") +
+                plan->profile.wallpaper.string() +
+                " is " + std::string{imageStatusName(destination.status)} +
+                (selectedProfile.wallpaper == plan->profile.wallpaper ? "" :
+                    ", default " + selectedProfile.wallpaper.string() + " is " + std::string{imageStatusName(selected.status)}),
+                failed);
+        }
+
         const auto texture = unwrapTexture(wallpaper);
         gpu::Input input{
             .destination = texture ? gpu::Image{texture->m_texID, {texture->m_size.x, texture->m_size.y},
@@ -781,6 +847,46 @@ struct Adapter::Impl {
         if (input.transitioning && ready && !wallpaperOccluded(monitor))
             g_pHyprRenderer->damageMonitor(monitor);
     }
+
+    std::string status() {
+        std::ostringstream result;
+        result << "config=" << configPath.string() << " status=" << (usingFallbackConfig ? "fallback" : "loaded") << '\n';
+        if (lastConfigError)
+            result << "config_error=" << lastConfigError->source << ": " << lastConfigError->message << '\n';
+        result << "active_output=" << engine.activeOutput().value_or("none") << '\n';
+        bool foundOutput = false;
+        for (const auto& monitor : State::monitorState()->monitors()) {
+            if (!monitor)
+                continue;
+            foundOutput = true;
+            result << "output=" << monitor->m_name;
+            if (config.excludedOutputs.contains(monitor->m_name)) {
+                result << " excluded\n";
+                continue;
+            }
+            const auto plan = engine.planFor(monitor->m_name);
+            if (!plan) {
+                result << " no-render-plan\n";
+                continue;
+            }
+            const auto image = cache.snapshot(plan->profile.wallpaper);
+            result << " workspace=" << (plan->workspace ? std::to_string(*plan->workspace) : "none")
+                   << " profile=" << plan->profileName << " wallpaper=" << plan->profile.wallpaper.string()
+                   << " image=" << imageStatusName(image.status) << " texture=" << (image.texture ? "yes" : "no");
+            if (const auto gpu = gpuErrors.find(monitor->m_name); gpu != gpuErrors.end())
+                result << " gpu=error:" << gpu->second;
+            else
+                result << " gpu=" << (gpuTextures.contains(monitor->m_name) ? "ready" : "not-rendered");
+            result << '\n';
+            if (!image.error.empty())
+                result << "image_error=" << image.error << '\n';
+            if (const auto state = outputStates.find(monitor->m_name); state != outputStates.end())
+                result << "display=" << state->second << '\n';
+        }
+        if (!foundOutput)
+            result << "outputs=none\n";
+        return result.str();
+    }
 };
 
 Adapter::Adapter(HANDLE handle, std::filesystem::path configPath, std::filesystem::path home) {
@@ -788,7 +894,14 @@ Adapter::Adapter(HANDLE handle, std::filesystem::path configPath, std::filesyste
     auto config = loaded ? std::move(loaded.value()) : fallbackConfig();
     if (!loaded)
         Log::logger->log(Log::ERR, "Luxaxis config {}: {}; using fallback color until a valid config is loaded", loaded.error().source, loaded.error().message);
+    else
+        Log::logger->log(Log::DEBUG, "Luxaxis config loaded: {} ({} profiles, {} workspace mappings)",
+                         configPath.string(), config.profiles.size(), config.workspaces.size());
     impl_ = std::make_unique<Impl>(handle, std::move(configPath), std::move(home), std::move(config));
+    if (!loaded) {
+        impl_->usingFallbackConfig = true;
+        impl_->lastConfigError = loaded.error();
+    }
 }
 
 Adapter::~Adapter() = default;
@@ -803,6 +916,11 @@ SP<SHyprCtlCommand> Adapter::registerSpotlightCommand() {
     return impl_->spotlightCommand;
 }
 
+SP<SHyprCtlCommand> Adapter::registerStatusCommand() {
+    impl_->statusCommand = HyprlandAPI::registerHyprCtlCommand(impl_->handle, {"luxaxis:status", true, [this](eHyprCtlOutputFormat, std::string) { return status(); }});
+    return impl_->statusCommand;
+}
+
 void Adapter::unregisterCommands() {
     if (impl_->reloadCommand) {
         HyprlandAPI::unregisterHyprCtlCommand(impl_->handle, impl_->reloadCommand);
@@ -811,6 +929,10 @@ void Adapter::unregisterCommands() {
     if (impl_->spotlightCommand) {
         HyprlandAPI::unregisterHyprCtlCommand(impl_->handle, impl_->spotlightCommand);
         impl_->spotlightCommand.reset();
+    }
+    if (impl_->statusCommand) {
+        HyprlandAPI::unregisterHyprCtlCommand(impl_->handle, impl_->statusCommand);
+        impl_->statusCommand.reset();
     }
 }
 
@@ -831,6 +953,10 @@ std::string Adapter::spotlight(std::string args) {
         return "expected on, off, or toggle";
     impl_->damageManagedOutputs();
     return impl_->engine.spotlightEnabled() ? "on" : "off";
+}
+
+std::string Adapter::status() {
+    return impl_->status();
 }
 
 } // namespace luxaxis::hyprland

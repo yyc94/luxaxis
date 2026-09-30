@@ -349,6 +349,20 @@ allowlist = ["fade", "wipe", "grow", "outer", "clock"]
 hyprctl luxaxis:reload
 ```
 
+壁纸显示为回退色或不符合预期时，直接查看插件状态：
+
+```bash
+hyprctl luxaxis:status
+```
+
+结果会列出实际读取的配置路径、每个输出的 workspace 和 profile、图片加载状态、纹理是否就绪、GPU 错误，以及当前使用图片、保留上一张图片还是使用回退色。此命令不依赖 Hyprland 文件日志。插件也会在配置加载、图片上传完成和输出绘制状态改变时写入 `Luxaxis` 日志。Hyprland 默认关闭文件日志；需要查看时，可以在当前会话中运行：
+
+```bash
+hyprctl keyword debug:disable_logs false
+```
+
+日志文件位于 `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/hyprland.log`。如需每次启动都记录日志，在 `hyprland.conf` 的 `debug` 块中设置 `disable_logs = false`。
+
 Spotlight 可以临时关闭或恢复。这个状态只存在于当前 Hyprland 会话，不会写入配置文件：
 
 ```bash

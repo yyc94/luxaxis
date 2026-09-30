@@ -27,8 +27,8 @@ bool Aquamarine::CBackend::start() {
             });
             if (!plugin)
                 throw std::runtime_error("load failed: " + error);
-            if (plugin->m_registeredHyprctlCommands.size() != 2)
-                throw std::runtime_error("plugin did not register both commands");
+            if (plugin->m_registeredHyprctlCommands.size() != 3)
+                throw std::runtime_error("plugin did not register all commands");
             for (const auto& weak : plugin->m_registeredHyprctlCommands) {
                 const auto command = weak.lock();
                 if (!command)
@@ -39,6 +39,10 @@ bool Aquamarine::CBackend::start() {
                 } else if (command->name == "luxaxis:spotlight") {
                     if (command->fn(FORMAT_NORMAL, "off") != "off" || command->fn(FORMAT_NORMAL, "on") != "on")
                         throw std::runtime_error("Spotlight commands failed");
+                } else if (command->name == "luxaxis:status") {
+                    const auto status = command->fn(FORMAT_NORMAL, "");
+                    if (status.find("config=") == std::string::npos || status.find("status=loaded") == std::string::npos)
+                        throw std::runtime_error("status command did not report the active config: " + status);
                 }
             }
             Event::bus()->m_events.workspace.active.emit(nullptr);

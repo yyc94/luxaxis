@@ -20,10 +20,12 @@ class Adapter {
 
     [[nodiscard]] SP<SHyprCtlCommand> registerReloadCommand();
     [[nodiscard]] SP<SHyprCtlCommand> registerSpotlightCommand();
+    [[nodiscard]] SP<SHyprCtlCommand> registerStatusCommand();
     void unregisterCommands();
 
     [[nodiscard]] std::string reload();
     [[nodiscard]] std::string spotlight(std::string args);
+    [[nodiscard]] std::string status();
 
   private:
     struct Impl;

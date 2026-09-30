@@ -3,3 +3,6 @@ default_profile = "default"
 
 [profiles.default]
 wallpaper = "/__luxaxis_test_wallpaper__.png"
+
+[workspaces]
+"1" = "default"

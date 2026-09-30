@@ -40,6 +40,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     adapter = std::make_unique<luxaxis::hyprland::Adapter>(handle, path.value(), homePath);
     (void)adapter->registerReloadCommand();
     (void)adapter->registerSpotlightCommand();
+    (void)adapter->registerStatusCommand();
     return {PLUGIN_NAME, "Workspace-aware wallpaper and Spotlight renderer", "Luxaxis contributors", "0.1.0"};
 }
 
