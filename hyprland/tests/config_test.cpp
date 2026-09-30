@@ -2,7 +2,9 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -148,15 +150,41 @@ void configPathFollowsXdgRules() {
     require(!path, "relative XDG_CONFIG_HOME was accepted");
 }
 
+void readmeExampleParses(const std::string& readmePath) {
+    std::ifstream file{readmePath};
+    require(static_cast<bool>(file), "cannot open README configuration example");
+    const std::string readme{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+    const std::string fence = "```toml\n";
+    const std::string marker = fence + "version = 1\n";
+    const auto start = readme.find(marker);
+    require(start != std::string::npos, "README configuration example is missing");
+    const auto end = readme.find("\n```", start + marker.size());
+    require(end != std::string::npos, "README configuration example is not closed");
+
+    const auto example = readme.substr(start + fence.size(), end - start - fence.size());
+    const auto parsed = luxaxis::parseConfig(example, readmePath, "/home/tester");
+    require(parsed.hasValue(), parsed.hasValue() ? "" : "README example: " + parsed.error().message);
+    const auto& config = parsed.value();
+    require(config.defaultProfile == "default" && config.workspaces.at(1) == "default" &&
+            config.workspaces.at(2) == "focus" && config.workspaces.at(3) == "beam",
+            "README workspace mappings changed unexpectedly");
+    require(config.transition && config.transition->type == luxaxis::TransitionType::Fade,
+            "README global transition did not parse");
+    require(config.profiles.at("default").wallpaper == "/home/tester/Pictures/wallpapers/default.webp",
+            "README wallpaper path did not expand");
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
         validConfigParses();
         strictValidationRejectsInvalidCandidates();
         invalidReplacementPreservesActiveConfig();
         configPathFollowsXdgRules();
         phaseTwoBTransitionConfigParsesStrictly();
+        require(argc == 2, "expected README path as the only argument");
+        readmeExampleParses(argv[1]);
     } catch (const std::exception& error) {
         std::cerr << "config_test: " << error.what() << '\n';
         return EXIT_FAILURE;

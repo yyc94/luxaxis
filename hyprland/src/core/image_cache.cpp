@@ -54,7 +54,7 @@ bool ImageCache::enqueue(const std::filesystem::path& path, const bool force) {
         std::lock_guard lock{mutex_};
         auto& entry = entries_[path];
         entry.pinned = pinnedPaths_.contains(path);
-        if (!force && entry.status != ImageStatus::Missing && entry.status != ImageStatus::Failed)
+        if (!force && entry.status != ImageStatus::Missing)
             return false;
         if (entry.status == ImageStatus::Loading || entry.status == ImageStatus::AwaitingUpload)
             return false;

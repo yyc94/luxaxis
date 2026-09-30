@@ -115,6 +115,29 @@ void failedRefreshRetainsLastValidTexture() {
     require(cache.residentBytes() == 16, "replacement double-counted texture bytes");
 }
 
+void failedImageStaysFailedUntilExplicitRefresh() {
+    FakeDecoder decoder;
+    const std::filesystem::path path = "/wall/missing.png";
+    decoder.failures[path] = true;
+    luxaxis::ImageCache cache{64, [&decoder](const auto& imagePath) { return decoder(imagePath); }};
+    cache.setPinned({path});
+
+    require(cache.request(path), "initial image was not queued");
+    cache.waitForIdle();
+    const auto failed = cache.snapshot(path);
+    require(failed.status == luxaxis::ImageStatus::Failed, "failed image did not expose failure state");
+    require(!cache.request(path), "ordinary render request retried a failed image");
+    const auto unchanged = cache.snapshot(path);
+    require(unchanged.status == luxaxis::ImageStatus::Failed, "ordinary render request hid the failure state");
+    require(unchanged.error == failed.error && unchanged.generation == failed.generation,
+            "ordinary render request changed the failed image diagnostic");
+
+    decoder.failures[path] = false;
+    require(cache.refresh(path), "explicit file refresh did not retry the failed image");
+    cache.waitForIdle();
+    require(cache.takeUploads().size() == 1, "successful retry did not produce an upload");
+}
+
 void invalidDecodeBufferIsRejected() {
     luxaxis::ImageCache cache{64, [](const auto&) -> luxaxis::Result<luxaxis::DecodedImage> {
                                    return luxaxis::DecodedImage{.width = 4, .height = 4, .stride = 4, .rgba = {0}};
@@ -184,6 +207,7 @@ int main() {
         lruEvictsUnpinnedTextures();
         pinnedTexturesMayTemporarilyExceedBudget();
         failedRefreshRetainsLastValidTexture();
+        failedImageStaysFailedUntilExplicitRefresh();
         invalidDecodeBufferIsRejected();
         oversizedDecodeBufferIsRejectedBeforeAccounting();
         decoderExceptionsBecomeFailures();
